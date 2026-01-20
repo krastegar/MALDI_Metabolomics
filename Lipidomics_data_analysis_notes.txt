@@ -1,0 +1,107 @@
+Lipidomics (data analysis notes): 
+
+	main software SCiLS Lab: 
+	need to convert data into SCILs data format -- is this from the file coming from the machine? 
+	in the sowftware you cnan change the orientation of the slides
+	feature finding is availabe in the software
+	
+		Once the data has been imported:
+		you can define a region in the data analysis (and make it a subset of your data)
+		Hotspot removal (maybe type of image normalization) this will mess with m/z peak intensity ..... I believe....Does it mess with the m/z peaks?
+		Denoising: useful for spatial segmentation (might be good for downstream processess)
+		mass spectra: is defaulted to whole image and can click on the peaks and will zoom in on the image related to that peak
+			skyline spectrum: (do more research on this) --- different from mean spectrum, but can be helpful for analyzing small peaks
+		SCILS lab uses centroid data: get the peak at the center of the profile peak...it shows the distribution of the measurement
+		SCILS allows you to create a feature finding list 
+		Data is not normally normalize and it would have to be normalized in the software......total to ion count or root mean squared normalization
+			total ion count doesnt seem very high resolution.....root mean square looks nice on the slides 
+		you can overlay ion images on top of each other......(what are ion images)
+		when changing the imaging scaling (does this change the reading on the intensity of the peaks?)
+		All of this is manually messing around with the ion image
+		
+	Generating feature list for downstream analysis: 
+		two algorithms for feature finding 
+			T-Rex^3 does feature finding  (mobility, mass-spec, ) -- 
+				has spatial averaging: defines regions of 2x2 pixels can go up randomly and then averages the intensities and then do feature finding in those regions
+			T-Rex^2 (Mass-spec only) --- TIMS (mass spec)
+		
+				has spatial noise filtering:
+					gradient of neighborhoods
+					when we have weak filter we have a threshold of how many neighbors that around each pixel ..... strong filter (choosing pixels that have lots of neighbors)
+		Also has peak intensity thresholds
+		Coverage is based on dataset size and will be automatically chosen based on time
+		
+		Can export featured lists ____the software calls features (peaks)....essentially it is just picking peaks and and it comes with an OMNI_tif file. piled up image file for each feature 
+		
+		De-isotoping .....
+			1% of C are heavy ..... we are regulating the heavy C atoms in this process (talking about C13 isotopes) messes with peak intensity and can produce artifacts
+			Isotope tracing / de-isotoping the same thing? 
+		some parameters to tune when finding peaks: 
+			change coverage
+			spatial feature filtering 
+			change threshold
+		
+		*** The software doesn't deal with batch effect ***
+	
+	
+	PCA analysis for M/Z: 
+		using spectra with 3 peaks so each spectra is a point in 3D space
+		i.e) then each spectra with n-peaks will be a point in n-space
+		
+		Scores plot: 
+			the density of the clouds are the determinant of similarity i.e ) higher density = more similarity 
+			scores plot are just the spectra projected on the PC axis 
+			
+		loading plot: 
+			m/z peaks and are similar to the scores plot and can give you insight into what is causing the changes/separation of clusters in scores plot
+		
+	Spatial segmentation: 
+		- unsupervised method 
+		- determines similarities "by some means of multivariate statistics"
+		- three algo's
+			- heirarchicarl clustering method .... looks like HDBSCAN (then uses this single-linkage method to find initial clustering
+			
+			-  Bisecting k-means: 
+			
+			- single 
+		- most of the time they use the spatial segmentation (which is most likely HDBSCAN)
+		- create clustering methods using k-means 
+		
+		- there are correlation tree that shows which ions correlate to which clusters. 
+		
+	
+	ROC plot: 
+		looks at how well the ions correlates to two different groups 
+		
+	SCILS API - gives you a guide in some analysis on how to incorporate the API into your lipidomics analysis. 
+	
+	
+	MetaboScape: 
+		Purpose: to annotate interesting peaks and see which metabolites 
+		
+		ROI subsampling 
+		
+			- this is where the 2x2 spatial averaging happens, each segment is called a speckle
+			- you can increase the number of speckles to increase the coverage of the averaging 
+	
+		Annotation: ---- They annotate the peaks 
+			- lipid annotation: looks at feature list and then compares it to the database of lipids and see if there is a match
+				* seems like guided learning, there are few parameters to adjust
+				* mSigma, m/z, etc...
+					* turn off attempt primary ion reassignment in the settings (will mess with downstream analysis
+					
+			- target list annotation: 
+				* contains the name and formula, and structure. 
+		
+		Annotated Data structure: 
+			comes with a AQ score uses the parameters (thresholds) to generate these color coded 
+			
+			
+			
+	SCILS exports the imzf format. but I think most of the data analysis can be exported as a csv
+			
+			
+			
+			
+		
+		

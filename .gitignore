@@ -205,3 +205,16 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Data folders or data
+MSI_data_grant/
+*.csv
+*.tar
+high_res_MSI/
+img_folder/ 
+*.html
+*.png
+*.tif*
+*.ibd
+*.imzML
+23925426/
