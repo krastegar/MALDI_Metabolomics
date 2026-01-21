@@ -8,12 +8,9 @@ from pyimzml.ImzMLParser import ImzMLParser, getionimage
 from SpaCoObject import SPACO
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler, normalize
-import hdbscan
 import plotly.express as px
 from sklearn.cluster import KMeans
 import umap
-import numpy as np
-from sklearn.neighbors import NearestNeighbors
 import igraph as ig
 import leidenalg as la
 
@@ -508,11 +505,10 @@ if __name__ == "__main__":
     sampled_features_list = random.sample(SF_reduced.columns.to_list(), 100) 
     sampled_df = SF_reduced[sampled_features_list]
     spaco = SPACO(sample_features = SF_reduced, neighbormatrix=adjacency_matrix, coords=coords)
-    denoised_data, spaco_projections, loadings = spaco.spaco_projection()
+    denoised_data, spaco_projections = spaco.spaco_projection()
 
     # plot the spacs
     spaco.plot_spatial_heatmap(spaco_projections[:,0], point_size=50, cmap='Spectral' ,title="spac_1")
-
     
     # filtering for significant features only 
     svg_test_results = [spaco.spaco_test(SF_reduced[col]) for col in SF_reduced.columns]
@@ -584,14 +580,16 @@ if __name__ == "__main__":
         )
 
         labels = np.array(partition.membership)
-
+        reducer = umap.UMAP(n_neighbors=5, min_dist=0.3, random_state=42, metric='cosine')
 
     # then do kmeans clustering if not leiden clustering 
-    kmeans = KMeans(n_clusters=C_num.shape[1], random_state=42)
-    labels = kmeans.fit_predict(C_num)
-    
+    kmeans = False
+    if kmeans:
+        kmeans = KMeans(n_clusters=C_num.shape[1], random_state=42)
+        labels = kmeans.fit_predict(C_num)
+        reducer = umap.UMAP(n_neighbors=5, min_dist=0.3, random_state=42)
     # Umap reduction 
-    reducer = umap.UMAP(n_neighbors=10, min_dist=0.3, random_state=42)
+    #reducer = umap.UMAP(n_neighbors=5, min_dist=0.3, random_state=42, metric='cosine')
     F_umap = reducer.fit_transform(C_num)  # shape (p_features, 2)
 
     # Use actual feature names 
@@ -604,7 +602,8 @@ if __name__ == "__main__":
             "Cluster": labels.astype(str),   # convert to string for discrete colors
             "Feature": feature_names
         })
-
+    # Choose a large non-repeating palette
+    color_palette = px.colors.qualitative.Alphabet
     # Create interactive scatter plot
     fig = px.scatter(
             df,
@@ -612,6 +611,7 @@ if __name__ == "__main__":
             color="Cluster",
             hover_name="Feature",   # shows feature name on hover
             title="Leiden + Normalized feature clustering",
+            color_discrete_sequence=color_palette,
             labels={"UMAP1": "UMAP Dimension 1", "UMAP2": "UMAP Dimension 2"}
         )
 

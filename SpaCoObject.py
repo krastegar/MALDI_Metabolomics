@@ -46,15 +46,19 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-from momentchi2 import wf
+import umap
+import igraph as ig
+import leidenalg as la
+import plotly.express as px
 from scipy.linalg import eigh
 from scipy.sparse.linalg import eigs
 from scipy.stats import t
+from scipy.sparse import csr_matrix
 from scipy import integrate
 from typing import Tuple
+from sklearn.preprocessing import StandardScaler, normalize
+from sklearn.neighbors import NearestNeighbors
 from concurrent.futures import ThreadPoolExecutor
-from sklearn.preprocessing import StandardScaler
 from functools import lru_cache
 
 
@@ -62,8 +66,8 @@ class SPACO:
     def __init__(
         self,
         sample_features,
-        neighbormatrix,
         coords,
+        neighbormatrix=None,
         c=0.95,
         compute_nSpacs=True,
         percentile=95,
@@ -91,14 +95,18 @@ class SPACO:
         self.percentile: int = percentile
         self.compute_nSpacs: bool = compute_nSpacs
         self.SF: np.ndarray = self.__preprocess(sample_features)
-        self.A: np.ndarray = self.__check_if_square(neighbormatrix)
         self.coords: np.ndarray = self.__rotate_coordinates(coords)
+        self.A: np.ndarray = self.__generate_adjacency_matrix(self.coords) if neighbormatrix is None else self.__generate_adjacency_matrix(self.coords, neighbormatrix)
         self.c: float = c
-        self.lambda_cut = None
-        self.nSpacs = None
         self.graphLaplacian = np.asarray((1 / self.A.shape[0]) * np.eye(self.A.shape[0]) + (
             1 / np.abs(self.A).sum()
         ) * self.A)
+        # lazy loading variables 
+        self.sample_names = None
+        self.feature_names = None
+        self.lambda_cut = None
+        self.nSpacs = None
+        self.loadings = None # to store loadings after projection
         self._cache = {}
 
     def __getattr__(self, name):
@@ -144,7 +152,7 @@ class SPACO:
             self._cache[name] = self.spectral_results[1]
         elif name == "Pspac" or name == "Vk":
             # Compute the projection of the sample features onto the SPACO space
-            self._cache["Pspac"], self._cache["Vk"], self._cache["loadings"] = self.spaco_projection()
+            self._cache["Pspac"], self._cache["Vk"] = self.spaco_projection()
         elif name == "sigma" or name == "sigma_eigh":
             # Compute the eigenvalues of the graph Laplacian
             self._cache["sigma_eigh"], self._cache["sigma"] = self.__sigma_eigenvalues()
@@ -192,23 +200,45 @@ class SPACO:
         """
         Preprocess the sample features array. normalize and remove constant features
         """
+        # if the sample feature matrix is a pandas dataframe we capture the feature and sample names
         if isinstance(X, pd.DataFrame):
-            X = X.to_numpy()  # Convert DataFrame to NumPy array
-        if not isinstance(X, np.ndarray):
-            raise ValueError("Input must be a numpy array.\n data type: ", type(X))
-        scaler = StandardScaler()
-        X = self.__remove_constant_features(X)
-        return scaler.fit_transform(X)
+            self.feature_names = X.columns.tolist()
+            self.sample_names = X.index.tolist()
+            X = X.to_numpy()
 
-    def __check_if_square(self, X: np.ndarray) -> np.ndarray:
-        """
-        Check if the neighborhood matrix is a square matrix.
-        """
-        #if not isinstance(X, np.ndarray):
-            #raise ValueError("Input must be a numpy array.")
-        if X.shape[0] != X.shape[1]:
-            raise ValueError("The input data is not a square matrix.")
-        return X
+        # We want to see if the numpy array is better for calculation or csr matrix based on sparsity
+        sparsity = 1 - np.count_nonzero(X) / X.size
+        if sparsity > 0.9:
+            X = csr_matrix(X)
+            # need to z-scale for csr matrix (so we perserve sparsity)
+            return 
+        else: 
+            scaler = StandardScaler()
+            X = self.__remove_constant_features(X)
+            return scaler.fit_transform(X)
+
+    def __generate_adjacency_matrix(self, coords: np.ndarray, n_neighbors: int = 10, neighbor_matrix: np.ndarray = None) -> np.ndarray:
+
+
+        if neighbor_matrix is not None:
+            sparsity = 1- np.count_nonzero(neighbor_matrix) / neighbor_matrix.size
+            if sparsity > 0.9:
+                return csr_matrix(neighbor_matrix)
+            else: 
+                return np.asarray(neighbor_matrix)
+
+
+        # Check if the coordinates are provided as a pandas DataFrame
+        if not isinstance(coords, pd.DataFrame):
+            raise ValueError("Coordinates must be provided as a pandas DataFrame.")
+        
+        # Run K-Nearest Neighbors to generate adjacency matrix
+        knn = NearestNeighbors(n_neighbors=n_neighbors, metric='euclidean', n_jobs=-1)
+        knn.fit(coords)
+        adjacency_matrix = knn.kneighbors_graph(coords, n_neighbors=n_neighbors, mode='distance')
+
+        return adjacency_matrix
+
 
     def __orthogonalize(
         self,
@@ -605,10 +635,10 @@ class SPACO:
             The matrix of SPACO projections.
         """
         # Compute the orthonormal basis U by dividing each eigenvector by the square root of its eigenvalue
-        loadings = self.sampled_sorted_eigvecs / np.sqrt(self.sampled_sorted_eigvals)
+        self.loadings = self.sampled_sorted_eigvecs / np.sqrt(self.sampled_sorted_eigvals)
 
         # Project the whitened data onto the orthonormal basis U to obtain the matrix Vk
-        Vk = self.whitened_data @ loadings
+        Vk = self.whitened_data @ self.loadings
 
         # Calculate the projection of the sample features onto the SPACO space
         # This involves projecting Vk, then transforming by the graph Laplacian, and finally projecting back
@@ -619,7 +649,7 @@ class SPACO:
         self.nSpacs = Vk.shape[1]
 
         # Return both the projection into SPACO space and the matrix of SPACO projections
-        return Pspac, Vk, loadings
+        return Pspac, Vk
 
     def __sigma_eigenvalues(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -739,6 +769,7 @@ class SPACO:
         
         # Clamp to [0, 1] to handle numerical errors
         return np.clip(prob, 0, 1)
+    
     def spaco_test(self, x: np.ndarray) -> Tuple[float, float]:
         """
         Perform a statistical test in the SPACO framework.
@@ -788,6 +819,170 @@ class SPACO:
         pVal = self.imhof(test_statistic, sorted_sigma_eigh)
 
         return pVal, test_statistic
+    
+    def features_in_spacs(
+            self,
+            n_neighbors,  
+            clustering='leiden', 
+            normalization=True, 
+            plot=True, 
+            save_file=False,
+            k=10):
+        
+        # filtering for significant features only 
+        # run tests, extract p-values, invert them, build mask, filter columns
+        print("Testing for significant features...")
+        pvals = [1 - self.spaco_test(self.SF[:, col])[0] for col in range(self.SF.shape[1])]
+        mask = [p < 0.05 for p in pvals]
+        significant_feature_filtered = self.SF[:, mask]  
+        print(significant_feature_filtered.shape[1], " significant features identified out of ", self.SF.shape[1], " total features. ")
+        # in case the inputted data is just given as a numpy.array
+        if self.feature_names is None:
+            self.feature_names = [i for i in range(self.SF.shape[1])]# at least label the columns whatever they are 
+            self.feature_names = [feature for i, feature in enumerate(self.feature_names) if mask[i]]# significant feature colums saved 
+
+        else:
+            feature_names = self.feature_names.tolist()
+            self.feature_names = [feature for i, feature in enumerate(feature_names) if mask[i]]
+
+        # check to see if we filtered out any of the non-significant features    
+        if significant_feature_filtered.shape[1] == self.SF.shape[1]:
+            for i in range(5):
+                print(" (-_-)/  ALL OF THE FEATURES HAVE BEEN TESTED AS SIGNIFICANT ")
+            
+
+        # lets go with the next steps in the clustering 
+        # embedding the features in meta-pattern space 
+        # center and scaling the data
+        scaler = StandardScaler()
+        # correlation matrix between features and meta-patterns
+        # 1) center columns (features and meta-patterns)
+        SFc = scaler.fit_transform(significant_feature_filtered)     # n x p
+        MPc = scaler.fit_transform(self._cache['Vk']) # n x k
+
+        # 2) dot product matrix (p x k)
+        #C_num = SFc.T @ MPc   # p x k # 
+        C_num = SFc.T @ self.graphLaplacian @ MPc 
+
+        if normalization:
+            C_num = normalize(C_num, axis=0, norm='l2') # feature/ column normalization
+        
+        # clustering algorithm
+        if clustering == 'leiden':
+            # ---------------------------------------------------------
+            # 1. Compute cosine KNN graph
+            # ---------------------------------------------------------
+
+            # X: your data matrix (n_samples × n_features)
+            # choose your neighborhood size
+
+            nbrs = NearestNeighbors(
+                n_neighbors=n_neighbors,
+                metric="cosine"
+            ).fit(C_num)
+
+            distances, indices = nbrs.kneighbors(C_num)
+
+            # ---------------------------------------------------------
+            # 2. Build igraph graph with cosine similarity weights
+            # ---------------------------------------------------------
+            edges = []
+            weights = []
+
+            for i in range(indices.shape[0]):
+                for j, d in zip(indices[i], distances[i]):
+                    if i != j:
+                        edges.append((i, j))
+                        weights.append(1 - d)   # cosine distance → similarity
+
+            g = ig.Graph(edges=edges, directed=False)
+            g.es["weight"] = weights
+
+            # ---------------------------------------------------------
+            # 3. Run Leiden clustering
+            # ---------------------------------------------------------
+
+            partition = la.find_partition(
+                g,
+                la.RBConfigurationVertexPartition,
+                weights=g.es["weight"],
+                resolution_parameter=1.0   # tune this for more/fewer clusters
+            )
+            # generated cluster labels via leiden clustering
+            labels = np.array(partition.membership)
+
+            # running UMAP reduction with cosine metric
+            reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=0.3, random_state=42, metric='cosine')
+
+        elif clustering == 'kmeans':
+            if k is None:
+                # then do kmeans clustering if not leiden clustering 
+                kmeans = KMeans(n_clusters=C_num.shape[1], random_state=42)
+                labels = kmeans.fit_predict(C_num)
+                reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=0.3, random_state=42)
+            else:
+                kmeans = KMeans(n_clusters=k, random_state=42)
+                labels = kmeans.fit_predict(C_num)
+                reducer = umap.UMAP(n_neighbors=n_neighbors, min_dist=0.3, random_state=42)
+        else: 
+            raise ValueError("Clustering method not recognized. Use 'leiden' or 'kmeans'.")
+        
+        print(f"Clustering completed using {clustering} method.")
+        # Umap reduction 
+        
+        F_umap = reducer.fit_transform(C_num)  # shape (p_features, 2)
+
+            # Build DataFrame for Plotly
+        df = pd.DataFrame({
+                "UMAP1": F_umap[:, 0],
+                "UMAP2": F_umap[:, 1],
+                "Cluster": labels.astype(str),   # convert to string for discrete colors
+                "Feature": self.feature_names
+            })
+
+        # Create interactive scatter plot
+        fig = px.scatter(
+                df,
+                x="UMAP1", y="UMAP2",
+                color="Cluster",
+                hover_name="Feature",   # shows feature name on hover
+                title="Leiden + Normalized feature clustering",
+                labels={"UMAP1": "UMAP Dimension 1", "UMAP2": "UMAP Dimension 2"}
+            )
+
+        # Optional: tweak marker size and transparency
+        fig.update_traces(marker=dict(size=8, opacity=0.8, line=dict(width=0)))
+
+        # Show interactive plot
+        #fig.write_html('Kmeans_no_Normalization.html')
+        if plot:
+            fig.show()
+
+        if save_file: 
+            fig.write(f'{clustering}.html')
+        # mean loadings per label...first get cluster df 
+        cov_cluster_df = pd.DataFrame(
+            C_num, 
+            columns=[f'Spac-{i+1}' for i in range(C_num.shape[1])], 
+            index= self.feature_names
+            )
+        cov_cluster_df['labels'] = labels
+        
+        # then get the actual average loading vectors 
+        avg_loadings = cov_cluster_df.groupby('labels').mean()
+
+        # matrix multiplication and then plot 
+        proj_Avgloadings = self._cache['Vk'] @ avg_loadings.values.T
+
+        # plot the projected average loadings
+        self.plot_spatial_heatmap(
+            proj_Avgloadings[:,0], 
+            point_size=10, 
+            cmap='Spectral',
+            title="Avg_loading_projection_1"
+            ) 
+
+        return
 
     def plot_spatial_heatmap(
         self,
@@ -875,7 +1070,7 @@ class SPACO:
             raise ValueError("coords must be a 2D array with shape (n_samples, 2)")
         return coords
 
-def generate_sample_data(n_samples=80, n_features=100, seed=0, k_neighbors=4):
+def generate_sample_data(n_samples=80, n_features=100, seed=0, k_neighbors=10):
     """
     Returns:
       X: (n_samples, n_features) sample feature matrix (float)
@@ -912,8 +1107,6 @@ if __name__ == "__main__":
     # call feature extraction method 
     _ = spaco.spaco_projection()
 
-    # call spaco_test 
-    for i in range(100):
-        pval, test_statistic = spaco.spaco_test(X[:, i])
-        #print(f"T-statistic for feature {i}: {test_statistic}", f"P-value for feature {i}: {pval}")
-    print('Done')
+    # time to inspect the features
+    # something to notice is that we call spaco_test for each feature in 
+    spaco.features_in_spacs(n_neighbors=5, clustering='leiden', normalization=True, plot=True, save_file=False)
