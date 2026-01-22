@@ -53,7 +53,7 @@ import plotly.express as px
 from scipy.linalg import eigh
 from scipy.sparse.linalg import eigs
 from scipy.stats import t
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, csc_matrix
 from scipy import integrate
 from typing import Tuple
 from sklearn.preprocessing import StandardScaler, normalize
@@ -96,7 +96,7 @@ class SPACO:
         self.compute_nSpacs: bool = compute_nSpacs
         self.SF: np.ndarray = self.__preprocess(sample_features)
         self.coords: np.ndarray = self.__rotate_coordinates(coords)
-        self.A: np.ndarray = self.__generate_adjacency_matrix(self.coords) if neighbormatrix is None else self.__generate_adjacency_matrix(self.coords, neighbormatrix)
+        self.A: np.ndarray = self.__generate_adjacency_matrix(coords=self.coords) if neighbormatrix is None else self.__generate_adjacency_matrix(coords=self.coords, neighbor_matrix=neighbormatrix)
         self.c: float = c
         self.graphLaplacian = np.asarray((1 / self.A.shape[0]) * np.eye(self.A.shape[0]) + (
             1 / np.abs(self.A).sum()
@@ -209,24 +209,72 @@ class SPACO:
         # We want to see if the numpy array is better for calculation or csr matrix based on sparsity
         sparsity = 1 - np.count_nonzero(X) / X.size
         if sparsity > 0.9:
-            X = csr_matrix(X)
+            Xc = csc_matrix(X)
+            print('matrix is sparse, converting to csr format')
+
             # need to z-scale for csr matrix (so we perserve sparsity)
-            return 
+            # so we calculate the mean first  
+            n = Xc.shape[0]
+            col_sum = np.asarray(Xc.sum(axis=0)).ravel()
+            col_mean = col_sum / n
+
+            # now the standard deviation
+            col_sq_sum = np.asarray(Xc.power(2).sum(axis=0)).ravel()
+            col_var = col_sq_sum / n - col_mean**2
+            col_var[col_var < 0] = 0.0 # numerical stability (get rid of floating point errors b/c variance can't be negative)
+            col_std = np.sqrt(col_var)
+            col_std[col_std == 0] = 1.0 # to avoid division by zero, at the end of the z-scale these will become 0 anyways
+
+            # apply z-score column-by-column 
+            for j in range(Xc.shape[1]): 
+                start, end = Xc.indptr[j], Xc.indptr[j+1] 
+                Xc.data[start:end] = (Xc.data[start:end] - col_mean[j]) / col_std[j] 
+            
+            # ---- Assertions to verify correctness ---- 
+            new_mean = np.asarray(Xc.sum(axis=0)).ravel() / n 
+            new_sq_sum = np.asarray(Xc.power(2).sum(axis=0)).ravel() 
+            new_var = new_sq_sum / n - new_mean**2 
+            new_std = np.sqrt(np.maximum(new_var, 0))
+
+            assert np.allclose(new_mean, 0, atol=1e-6), "Sparse z-score failed: means not ~0" 
+            assert np.allclose(new_std, 1, atol=1e-6), "Sparse z-score failed: stds not ~1"
+            return Xc.tocsr()
         else: 
             scaler = StandardScaler()
             X = self.__remove_constant_features(X)
             return scaler.fit_transform(X)
 
-    def __generate_adjacency_matrix(self, coords: np.ndarray, n_neighbors: int = 10, neighbor_matrix: np.ndarray = None) -> np.ndarray:
+    def __generate_adjacency_matrix(self, coords: pd.DataFrame, n_neighbors: int = 10, neighbor_matrix: np.ndarray = None) -> np.ndarray:
+        """
+        Generate the adjacency matrix from the coordinates of the spots and the neighboring spots.
 
+        Parameters
+        ----------
+        coords : pandas.DataFrame
+            The coordinates of the spots.
+        n_neighbors : int, optional
+            The number of neighboring spots to consider. Default is 10.
+        neighbor_matrix : numpy.ndarray, optional
+            The pre-computed neighbor matrix. If provided, it will be used instead of computing the adjacency matrix.
 
+        Returns
+        -------
+        The adjacency matrix as a sparse matrix of shape (N, N) where N is the number of spots.
+        """
+        # Check if neighborhood matrix is provided
         if neighbor_matrix is not None:
+            
+            # Return the provided neighbor matrix if it is already in sparse format
+            if isinstance(neighbor_matrix, csr_matrix) or isinstance(neighbor_matrix, csc_matrix):
+                return neighbor_matrix
+
+            # Otherwise, convert it to a sparse matrix if it is sufficiently sparse
             sparsity = 1- np.count_nonzero(neighbor_matrix) / neighbor_matrix.size
             if sparsity > 0.9:
                 return csr_matrix(neighbor_matrix)
+            # if it doesnt meet sparsity threshold, return as dense matrix
             else: 
                 return np.asarray(neighbor_matrix)
-
 
         # Check if the coordinates are provided as a pandas DataFrame
         if not isinstance(coords, pd.DataFrame):
@@ -990,7 +1038,7 @@ class SPACO:
         marker = 'o',
         title="Spatial Heatmap",
         cmap="viridis",
-        point_size=50,
+        point_size=10,
         rotate_coords=False,
     ):
         """
@@ -1033,8 +1081,8 @@ class SPACO:
         # Create the scatter plot
         plt.figure(figsize=(8, 6))
         scatter = plt.scatter(
-            self.coords[:, 0],
-            self.coords[:, 1],
+            self.coords['X'],
+            self.coords['Y'],
             c=values,
             cmap=cmap,
             s=point_size,
@@ -1068,7 +1116,7 @@ class SPACO:
         coords = coords @ rotation_matrix.T
         if coords.ndim != 2 or coords.shape[1] != 2:
             raise ValueError("coords must be a 2D array with shape (n_samples, 2)")
-        return coords
+        return pd.DataFrame(coords, columns=['X', 'Y'])
 
 def generate_sample_data(n_samples=80, n_features=100, seed=0, k_neighbors=10):
     """
@@ -1101,8 +1149,9 @@ if __name__ == "__main__":
     from sklearn.cluster import KMeans
     # generating fake data
     X, A, coords = generate_sample_data()
-
-    spaco = SPACO(X, A, coords)
+    coords = pd.DataFrame(coords, columns=['X', 'Y'])
+    print(f'coords data type: {type(coords)}')
+    spaco = SPACO(sample_features=X, coords=coords, neighbormatrix=A)
 
     # call feature extraction method 
     _ = spaco.spaco_projection()
