@@ -502,8 +502,7 @@ if __name__ == "__main__":
     
     # run spaco
     # randomly pick 100 peaks / features
-    sampled_features_list = random.sample(SF_reduced.columns.to_list(), 100) 
-    sampled_df = SF_reduced[sampled_features_list]
+    random.seed(42)
     spaco = SPACO(sample_features = SF_reduced, neighbormatrix=adjacency_matrix, coords=coords)
     denoised_data, spaco_projections = spaco.spaco_projection()
 
