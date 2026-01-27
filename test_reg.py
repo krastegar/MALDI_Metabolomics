@@ -539,7 +539,7 @@ class MALDIRegistration:
         
         return mapping_df
     
-    def visualize_coordinate_mapping(self, n_arrows=20):
+    def visualize_coordinate_mapping(self):
         """
         Visualize the coordinate transformation as a vector field and grid deformation.
         
@@ -557,24 +557,24 @@ class MALDIRegistration:
         
         # Calculate displacement vectors (from affine-transformed position to final position)
         # First get affine-only transformation
-        #maldi_grid_homogeneous = np.column_stack([self.maldi_grid, np.ones(len(self.maldi_grid))])
-        affine_only = (self.refined_affine @ self.maldi_grid.T).T[:, :2]
+        maldi_grid_homogeneous = np.column_stack([self.maldi_grid, np.ones(len(self.maldi_grid))])
+        #print(f'\nmaldi grid shape: {self.maldi_grid.shape}, \nrefined_afine_shape: {self.refined_affine.shape}')
+        affine_only = (self.refined_affine @ maldi_grid_homogeneous.T).T[:, :2]
         
         # Displacement is the NON-RIGID component only
         displacement = he_grid - affine_only
         
-        fig = plt.figure(figsize=(20, 8))
-        gs = fig.add_gridspec(1, 3, width_ratios=[1, 1, 1])
+        fig = plt.figure(figsize=(25, 15))
+        gs = fig.add_gridspec(1, 2, width_ratios=[1, 1])
         ax1 = fig.add_subplot(gs[0])
         ax2 = fig.add_subplot(gs[1])
-        ax3 = fig.add_subplot(gs[2])
         
         # Left: Deformed grid overlay on H&E
         ax1.imshow(self.he_image, alpha=0.8)
-        # Plot grid lines showing how regular MALDI grid deforms to H&E space
-        for i in range(n_arrows):
-            ax1.plot(he_grid_x[i, :], he_grid_y[i, :], 'r-', alpha=0.5, linewidth=1)
-            ax1.plot(he_grid_x[:, i], he_grid_y[:, i], 'r-', alpha=0.5, linewidth=1)
+
+        # Plot grid points showing how regular MALDI grid deforms to H&E space
+        ax1.plot(he_grid_x, he_grid_y, 'bo', alpha=0.1, markersize=1, label='MALDI_points')
+
         # Mark landmarks
         ax1.plot(self.he_landmarks[:, 0], self.he_landmarks[:, 1], 
                 'go', markersize=8, markeredgecolor='white', markeredgewidth=2, 
@@ -592,57 +592,27 @@ class MALDIRegistration:
         
         ax2.imshow(self.he_image, alpha=0.7)
         # Only show vectors where there's significant non-rigid deformation
+        # ...existing code...
         mask = displacement_mag > 1.0  # Only show displacements > 1 pixel
+        quiv = None
         if np.any(mask):
-            ax2.quiver(affine_only[mask, 0], affine_only[mask, 1], 
-                      displacement[mask, 0], displacement[mask, 1],
-                      displacement_mag[mask], cmap='hot', alpha=0.8, 
-                      scale=1, scale_units='xy', angles='xy', width=0.003)
+            quiv = ax2.quiver(
+                affine_only[mask, 0], affine_only[mask, 1], 
+                displacement[mask, 0], displacement[mask, 1],
+                displacement_mag[mask], cmap='Spectral', alpha=0.8, 
+                scale=1, scale_units='xy', angles='xy', width=0.003
+            )
+            plt.colorbar(quiv, label="Displacement Magnitude (pixels)", ax=ax2)  # ✓ This is correct
         ax2.set_title(f'Non-Rigid Displacement Vectors\n(Max: {max_displacement:.1f} pixels)', 
-                     fontsize=12, fontweight='bold')
+                    fontsize=12, fontweight='bold')
         ax2.set_xlabel('X (pixels)')
         ax2.set_ylabel('Y (pixels)')
-        
-        # Right: Registration accuracy at landmarks
-        # Transform MALDI landmarks to H&E space
-        he_landmarks_predicted = self.transform_maldi_to_he_coordinates(self.maldi_landmarks)
-        landmark_errors = np.sqrt(np.sum((he_landmarks_predicted - self.he_landmarks)**2, axis=1))
-        
-        ax3.imshow(self.he_image, alpha=0.7)
-        # Show predicted vs actual landmark positions
-        for i in range(len(self.he_landmarks)):
-            # Draw line from predicted to actual
-            ax3.plot([he_landmarks_predicted[i, 0], self.he_landmarks[i, 0]],
-                    [he_landmarks_predicted[i, 1], self.he_landmarks[i, 1]],
-                    'y-', linewidth=2, alpha=0.7)
-            # Actual landmarks (ground truth)
-            ax3.plot(self.he_landmarks[i, 0], self.he_landmarks[i, 1],
-                    'go', markersize=10, markeredgecolor='white', markeredgewidth=2,
-                    label='Target' if i == 0 else '')
-            # Predicted landmarks (from transformation)
-            ax3.plot(he_landmarks_predicted[i, 0], he_landmarks_predicted[i, 1],
-                    'rx', markersize=10, markeredgewidth=3,
-                    label='Transformed' if i == 0 else '')
-            # Show error magnitude
-            ax3.text(self.he_landmarks[i, 0], self.he_landmarks[i, 1] - 20,
-                    f'{landmark_errors[i]:.1f}px', color='yellow', fontsize=9,
-                    ha='center', fontweight='bold',
-                    bbox=dict(boxstyle='round', facecolor='black', alpha=0.5))
-        
-        mean_error = np.mean(landmark_errors)
-        max_error = np.max(landmark_errors)
-        ax3.set_title(f'Registration Accuracy at Landmarks\nMean Error: {mean_error:.2f}px, Max: {max_error:.2f}px', 
-                     fontsize=12, fontweight='bold')
-        ax3.set_xlabel('X (pixels)')
-        ax3.set_ylabel('Y (pixels)')
-        ax3.legend()
-        
+
+# ...existing code...
         plt.tight_layout()
         plt.savefig('coordinate_mapping_accuracy.png', dpi=150, bbox_inches='tight')
         print(f"Saved coordinate mapping visualization to 'coordinate_mapping_accuracy.png'")
         print(f"\nRegistration Accuracy:")
-        print(f"  Mean landmark error: {mean_error:.2f} pixels")
-        print(f"  Max landmark error: {max_error:.2f} pixels")
         print(f"  Max non-rigid displacement: {max_displacement:.1f} pixels")
         plt.show()
     
