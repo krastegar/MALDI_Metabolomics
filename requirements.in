@@ -15,3 +15,4 @@ umap-learn
 leidenalg
 igraph
 tensorflow
+stardist # still needs to be added to requirements.txt
