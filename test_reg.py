@@ -8,12 +8,15 @@ transformation functions to map MALDI coordinates to H&E space.
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button
+import matplotlib.cm as cm          
 import cv2
 from scipy import ndimage
 from scipy.interpolate import RBFInterpolator
 from scipy.optimize import minimize
 from skimage import transform, filters
 from pyimzml.ImzMLParser import ImzMLParser
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
@@ -542,11 +545,7 @@ class MALDIRegistration:
     def visualize_coordinate_mapping(self):
         """
         Visualize the coordinate transformation as a vector field and grid deformation.
-        
-        Parameters:
-        -----------
-        n_arrows : int
-            Number of arrows to display in each dimension
+        Interactive Plotly version.
         """
         print(f"\nGenerating coordinate mapping visualization...")
         tissue_coords = np.asarray([coords[:2] for coords in self.maldi_df['coordinates']])
@@ -558,65 +557,168 @@ class MALDIRegistration:
         # Calculate displacement vectors (from affine-transformed position to final position)
         # First get affine-only transformation
         maldi_grid_homogeneous = np.column_stack([self.maldi_grid, np.ones(len(self.maldi_grid))])
-        #print(f'\nmaldi grid shape: {self.maldi_grid.shape}, \nrefined_afine_shape: {self.refined_affine.shape}')
         affine_only = (self.refined_affine @ maldi_grid_homogeneous.T).T[:, :2]
         
         # Displacement is the NON-RIGID component only
         displacement = he_grid - affine_only
-        
-        fig = plt.figure(figsize=(25, 15))
-        gs = fig.add_gridspec(1, 2, width_ratios=[1, 1])
-        ax1 = fig.add_subplot(gs[0])
-        ax2 = fig.add_subplot(gs[1])
-        
-        # Left: Deformed grid overlay on H&E
-        ax1.imshow(self.he_image, alpha=0.8)
-
-        # Plot grid points showing how regular MALDI grid deforms to H&E space
-        ax1.plot(he_grid_x, he_grid_y, 'bo', alpha=0.1, markersize=1, label='MALDI_points')
-
-        # Mark landmarks
-        ax1.plot(self.he_landmarks[:, 0], self.he_landmarks[:, 1], 
-                'go', markersize=8, markeredgecolor='white', markeredgewidth=2, 
-                label='H&E landmarks')
-        ax1.set_title('MALDI Grid Deformed to H&E Space\n(Shows where MALDI spots map to)', 
-                     fontsize=12, fontweight='bold')
-        ax1.set_xlabel('H&E X (pixels)')
-        ax1.set_ylabel('H&E Y (pixels)')
-        ax1.legend()
-        ax1.axis('equal')
-        
-        # Middle: Non-rigid displacement vectors only
         displacement_mag = np.sqrt(displacement[:, 0]**2 + displacement[:, 1]**2)
         max_displacement = np.max(displacement_mag)
         
-        ax2.imshow(self.he_image, alpha=0.7)
+        # Subsample points for clearer visualization (show only half the points)
+        subsample_indices = np.random.choice(len(he_grid_x), size=len(he_grid_x)//2, replace=False)
+        
+        fig = make_subplots(
+            rows=1, cols=2,
+            subplot_titles=('MALDI Grid Deformed to H&E Space<br>(Shows where MALDI spots map to)',
+                        f'Non-Rigid Displacement Vectors<br>(Max: {max_displacement:.1f} pixels)'),
+            horizontal_spacing=0.1
+        )
+        
+        # Left plot: Deformed grid overlay on H&E
+        # Add H&E image
+        fig.add_trace(
+            go.Image(z=self.he_image),
+            row=1, col=1
+        )
+        
+        # Add MALDI points (subsampled)
+        fig.add_trace(
+            go.Scatter(
+                x=he_grid_x[subsample_indices],
+                y=he_grid_y[subsample_indices],
+                mode='markers',
+                marker=dict(color='blue', size=3, opacity=0.1),
+                name='MALDI points',
+                hovertemplate='MALDI point<br>X: %{x:.1f}<br>Y: %{y:.1f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+        
+        # Add H&E landmarks
+        fig.add_trace(
+            go.Scatter(
+                x=self.he_landmarks[:, 0],
+                y=self.he_landmarks[:, 1],
+                mode='markers',
+                marker=dict(color='green', size=8, 
+                        line=dict(color='white', width=2)),
+                name='H&E landmarks',
+                hovertemplate='Landmark<br>X: %{x:.1f}<br>Y: %{y:.1f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+        
+        # Right plot: Non-rigid displacement vectors
+        # Add H&E image
+        fig.add_trace(
+            go.Image(z=self.he_image),
+            row=1, col=2
+        )
+        
         # Only show vectors where there's significant non-rigid deformation
-        # ...existing code...
-        mask = displacement_mag > 1.0  # Only show displacements > 1 pixel
-        quiv = None
+        mask = displacement_mag > 1.0
+        
         if np.any(mask):
-            quiv = ax2.quiver(
-                affine_only[mask, 0], affine_only[mask, 1], 
-                displacement[mask, 0], displacement[mask, 1],
-                displacement_mag[mask], cmap='Spectral', alpha=0.8, 
-                scale=1, scale_units='xy', angles='xy', width=0.003
+            # Subsample displacement vectors for performance
+            vector_subsample = min(500, np.sum(mask))  # Show max 500 vectors
+            if np.sum(mask) > vector_subsample:
+                mask_indices = np.where(mask)[0]
+                selected_indices = np.random.choice(mask_indices, size=vector_subsample, replace=False)
+                vector_mask = np.zeros(len(mask), dtype=bool)
+                vector_mask[selected_indices] = True
+            else:
+                vector_mask = mask
+            
+            # Normalize displacement magnitudes to [0, 1] for colormap
+            norm_disp = (displacement_mag[vector_mask] - displacement_mag[vector_mask].min()) / \
+                        (displacement_mag[vector_mask].max() - displacement_mag[vector_mask].min() + 1e-10)
+            
+            # Use matplotlib's Spectral colormap to get RGB colors
+            colormap = cm.get_cmap('Spectral')
+            colors = [f'rgb({int(r*255)},{int(g*255)},{int(b*255)})' 
+                    for r, g, b, _ in colormap(norm_disp)]
+            
+            # Add displacement vectors as individual scatter traces
+            for idx, i in enumerate(np.where(vector_mask)[0]):
+                # Start and end points of arrow
+                x_start, y_start = affine_only[i, 0], affine_only[i, 1]
+                x_end, y_end = he_grid[i, 0], he_grid[i, 1]
+                
+                fig.add_trace(
+                    go.Scatter(
+                        x=[x_start, x_end],
+                        y=[y_start, y_end],
+                        mode='lines',
+                        line=dict(color=colors[idx], width=2),
+                        showlegend=False,
+                        hovertemplate=f'Displacement: {displacement_mag[i]:.2f} px<extra></extra>'
+                    ),
+                    row=1, col=2
+                )
+            
+            # Add arrowheads with colorbar
+            fig.add_trace(
+                go.Scatter(
+                    x=he_grid[vector_mask, 0],
+                    y=he_grid[vector_mask, 1],
+                    mode='markers',
+                    marker=dict(
+                        color=displacement_mag[vector_mask],
+                        colorscale='Spectral',
+                        size=6,
+                        symbol='arrow',
+                        colorbar=dict(
+                            title='Displacement (px)',
+                            x=1.15,
+                            len=0.5,
+                            y=0.5
+                        ),
+                        showscale=True
+                    ),
+                    name='Displacement',
+                    hovertemplate='Displacement: %{marker.color:.2f} px<extra></extra>'
+                ),
+                row=1, col=2
             )
-            plt.colorbar(quiv, label="Displacement Magnitude (pixels)", ax=ax2)  # ✓ This is correct
-        ax2.set_title(f'Non-Rigid Displacement Vectors\n(Max: {max_displacement:.1f} pixels)', 
-                    fontsize=12, fontweight='bold')
-        ax2.set_xlabel('X (pixels)')
-        ax2.set_ylabel('Y (pixels)')
-
-# ...existing code...
-        plt.tight_layout()
-        plt.savefig('coordinate_mapping_accuracy.png', dpi=150, bbox_inches='tight')
-        print(f"Saved coordinate mapping visualization to 'coordinate_mapping_accuracy.png'")
+        else:
+            # Add text if no significant displacement
+            fig.add_annotation(
+                text='No significant non-rigid displacement<br>(all < 1.0 pixels)',
+                xref='x4', yref='y4',
+                x=0.5, y=0.5,
+                xanchor='center', yanchor='middle',
+                showarrow=False,
+                font=dict(size=14),
+                bgcolor='wheat',
+                opacity=0.8,
+                row=1, col=2
+            )
+        
+        # Update layout
+        fig.update_xaxes(title_text='H&E X (pixels)', row=1, col=1)
+        fig.update_yaxes(title_text='H&E Y (pixels)', row=1, col=1, scaleanchor='x', scaleratio=1)
+        fig.update_xaxes(title_text='X (pixels)', row=1, col=2)
+        fig.update_yaxes(title_text='Y (pixels)', row=1, col=2, scaleanchor='x2', scaleratio=1)
+        
+        fig.update_layout(
+            height=700,
+            width=1600,
+            title_text='Coordinate Mapping Visualization',
+            showlegend=True,
+            hovermode='closest'
+        )
+        
+        # Save as HTML
+        fig.write_html('coordinate_mapping_accuracy.html')
+        print(f"Saved interactive coordinate mapping visualization to 'coordinate_mapping_accuracy.html'")
         print(f"\nRegistration Accuracy:")
         print(f"  Max non-rigid displacement: {max_displacement:.1f} pixels")
-        plt.show()
-    
-    # ========== END NEW METHODS ==========
+        print(f"  Showing {len(subsample_indices)} of {len(he_grid_x)} total MALDI points")
+        if np.any(mask):
+            print(f"  Showing {np.sum(vector_mask)} displacement vectors")
+        
+        fig.show()
+        # ========== END NEW METHODS ==========
     
     def visualize_results(self):
         """Visualize registration results."""
