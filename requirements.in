@@ -14,3 +14,4 @@ plotly
 umap-learn
 leidenalg
 igraph
+tensorflow

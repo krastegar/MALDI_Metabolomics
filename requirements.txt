@@ -4,10 +4,21 @@
 #
 #    pip-compile --output-file=requirements.txt requirements.in
 #
+absl-py==2.4.0
+    # via
+    #   keras
+    #   tensorboard
+    #   tensorflow
 anndata==0.12.8
     # via scanpy
 array-api-compat==1.13.0
     # via anndata
+astunparse==1.6.3
+    # via tensorflow
+certifi==2026.1.4
+    # via requests
+charset-normalizer==3.4.4
+    # via requests
 contourpy==1.3.3
     # via matplotlib
 cuda-bindings==12.9.4
@@ -22,16 +33,30 @@ et-xmlfile==2.0.0
     # via openpyxl
 filelock==3.20.3
     # via torch
+flatbuffers==25.12.19
+    # via tensorflow
 fonttools==4.61.1
     # via matplotlib
 fsspec==2026.1.0
     # via torch
+gast==0.7.0
+    # via tensorflow
 google-crc32c==1.8.0
     # via zarr
+google-pasta==0.2.0
+    # via tensorflow
+grpcio==1.76.0
+    # via
+    #   tensorboard
+    #   tensorflow
 h5py==3.15.1
     # via
     #   anndata
+    #   keras
     #   scanpy
+    #   tensorflow
+idna==3.11
+    # via requests
 igraph==1.0.0
     # via
     #   -r requirements.in
@@ -45,6 +70,8 @@ joblib==1.5.3
     #   pynndescent
     #   scanpy
     #   scikit-learn
+keras==3.13.1
+    # via tensorflow
 kiwisolver==1.4.9
     # via matplotlib
 lazy-loader==0.4
@@ -55,19 +82,35 @@ legacy-api-wrap==1.5
     #   scanpy
 leidenalg==0.11.0
     # via -r requirements.in
+libclang==18.1.1
+    # via tensorflow
 llvmlite==0.46.0
     # via
     #   numba
     #   pynndescent
+markdown==3.10.1
+    # via tensorboard
+markdown-it-py==4.0.0
+    # via rich
 markupsafe==3.0.3
-    # via jinja2
+    # via
+    #   jinja2
+    #   werkzeug
 matplotlib==3.10.8
     # via
     #   -r requirements.in
     #   scanpy
     #   seaborn
+mdurl==0.1.2
+    # via markdown-it-py
+ml-dtypes==0.5.4
+    # via
+    #   keras
+    #   tensorflow
 mpmath==1.3.0
     # via sympy
+namex==0.1.0
+    # via keras
 narwhals==2.15.0
     # via plotly
 natsort==8.4.0
@@ -93,7 +136,9 @@ numpy==2.3.5
     #   contourpy
     #   h5py
     #   imageio
+    #   keras
     #   matplotlib
+    #   ml-dtypes
     #   numba
     #   numcodecs
     #   opencv-python
@@ -106,6 +151,8 @@ numpy==2.3.5
     #   scipy
     #   seaborn
     #   statsmodels
+    #   tensorboard
+    #   tensorflow
     #   tifffile
     #   umap-learn
     #   zarr
@@ -152,15 +199,23 @@ opencv-python==4.13.0.90
     # via -r requirements.in
 openpyxl==3.1.5
     # via -r requirements.in
+opt-einsum==3.4.0
+    # via tensorflow
+optree==0.18.0
+    # via keras
 packaging==26.0
     # via
     #   anndata
+    #   keras
     #   lazy-loader
     #   matplotlib
     #   plotly
     #   scanpy
     #   scikit-image
     #   statsmodels
+    #   tensorboard
+    #   tensorflow
+    #   wheel
     #   zarr
 pandas==2.3.3
     # via
@@ -178,8 +233,15 @@ pillow==12.1.0
     #   imageio
     #   matplotlib
     #   scikit-image
+    #   tensorboard
 plotly==6.5.2
     # via -r requirements.in
+protobuf==6.33.4
+    # via
+    #   tensorboard
+    #   tensorflow
+pygments==2.19.2
+    # via rich
 pyimzml==1.5.5
     # via -r requirements.in
 pynndescent==0.6.0
@@ -196,6 +258,10 @@ pytz==2025.2
     # via pandas
 pyyaml==6.0.3
     # via donfig
+requests==2.32.5
+    # via tensorflow
+rich==14.3.1
+    # via keras
 scanpy==1.11.5
     # via -r requirements.in
 scikit-image==0.26.0
@@ -223,11 +289,23 @@ seaborn==0.13.2
 session-info2==0.3
     # via scanpy
 six==1.17.0
-    # via python-dateutil
+    # via
+    #   astunparse
+    #   google-pasta
+    #   python-dateutil
+    #   tensorflow
 statsmodels==0.14.6
     # via scanpy
 sympy==1.14.0
     # via torch
+tensorboard==2.20.0
+    # via tensorflow
+tensorboard-data-server==0.7.2
+    # via tensorboard
+tensorflow==2.20.0
+    # via -r requirements.in
+termcolor==3.3.0
+    # via tensorflow
 texttable==1.7.0
     # via igraph
 threadpoolctl==3.6.0
@@ -244,8 +322,11 @@ triton==3.6.0
     # via torch
 typing-extensions==4.15.0
     # via
+    #   grpcio
     #   numcodecs
+    #   optree
     #   scanpy
+    #   tensorflow
     #   torch
     #   zarr
 tzdata==2025.3
@@ -254,7 +335,18 @@ umap-learn==0.5.11
     # via
     #   -r requirements.in
     #   scanpy
+urllib3==2.6.3
+    # via requests
+werkzeug==3.1.5
+    # via tensorboard
+wheel==0.46.3
+    # via astunparse
 wheezy-template==3.2.4
     # via pyimzml
+wrapt==2.0.1
+    # via tensorflow
 zarr==3.1.5
     # via anndata
+
+# The following packages are considered to be unsafe in a requirements file:
+# setuptools
