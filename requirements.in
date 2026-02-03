@@ -14,5 +14,5 @@ plotly
 umap-learn
 leidenalg
 igraph
-tensorflow
+tensorflow[and-cuda]
 stardist # still needs to be added to requirements.txt
