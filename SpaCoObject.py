@@ -1093,7 +1093,8 @@ class SPACO:
         plt.title(title)
         plt.xlabel("X Coordinate")
         plt.ylabel("Y Coordinate")
-        plt.grid(True)
+        #plt.grid(True)
+        plt.axis('off')
         plt.show()
 
     def __rotate_coordinates(self, coords) -> np.ndarray:

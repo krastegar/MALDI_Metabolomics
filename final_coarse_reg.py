@@ -873,7 +873,7 @@ if __name__ == "__main__":
     registration = run_registration_pipeline(
         he_path=HE_PATH,
         maldi_path=MALDI_PATH,
-        n_landmarks=5,
+        n_landmarks=8,
         save_coords=True,
         grid_spacing=1,      # Map every pixel
         tissue_only=True     # Only map tissue regions, not background!
