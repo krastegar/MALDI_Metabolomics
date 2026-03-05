@@ -8,12 +8,9 @@ from pyimzml.ImzMLParser import ImzMLParser, getionimage
 from SpaCoObject import SPACO
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler, normalize
-import hdbscan
 import plotly.express as px
 from sklearn.cluster import KMeans
 import umap
-import numpy as np
-from sklearn.neighbors import NearestNeighbors
 import igraph as ig
 import leidenalg as la
 
@@ -478,10 +475,10 @@ def compute_sparsity(data, by='mzs', intensity_thresh=None, plot=True, save_path
 
 if __name__ == "__main__":
     # file path to the imzml file
-    imzml_path = Path("/home/krastegar0/MALDI_Metabolomics/MSI_data_grant/Mass_Spec_data/20251012_old_liver_area.imzML")
+    imzml_path = Path("./MSI_data_grant/Mass_Spec_data/20251012_young_liver.imzML")
 
     # initialize the SpectrumData class
-    spectrum_data = SpectrumData(imzml_path, mz_tol=0.0042, min_count=25, min_intensity=0)
+    spectrum_data = SpectrumData(imzml_path, mz_tol=0.0042, min_count=1000, min_intensity=100)
 
     # perform DBSCAN-like clustering
     clustered_df = spectrum_data.dbscan_1d_ish()
@@ -505,143 +502,12 @@ if __name__ == "__main__":
     
     # run spaco
     # randomly pick 100 peaks / features
-    sampled_features_list = random.sample(SF_reduced.columns.to_list(), 100) 
-    sampled_df = SF_reduced[sampled_features_list]
+    random.seed(42)
     spaco = SPACO(sample_features = SF_reduced, neighbormatrix=adjacency_matrix, coords=coords)
-    denoised_data, spaco_projections, loadings = spaco.spaco_projection()
+    denoised_data, spaco_projections = spaco.spaco_projection()
 
     # plot the spacs
     spaco.plot_spatial_heatmap(spaco_projections[:,0], point_size=50, cmap='Spectral' ,title="spac_1")
-
     
-    # filtering for significant features only 
-    svg_test_results = [spaco.spaco_test(SF_reduced[col]) for col in SF_reduced.columns]
-    svg_test_results = [pval for pval, _ in svg_test_results]
-    pval = [1-p for p in svg_test_results]
-    mask = [True if p < .05 else False for p in pval]
-    significant_feature_filtered = SF_reduced.loc[:, mask] # 610/625 features are spatially??
-
-    # lets go with the next steps in the clustering 
-    # embedding the features in meta-pattern space 
-    # center and scaling the data
-    scaler = StandardScaler()
-    # correlation matrix between features and meta-patterns
-    # 1) center columns (features and meta-patterns)
-    SFc = scaler.fit_transform(significant_feature_filtered)     # n x p
-    MPc = scaler.fit_transform(spaco_projections) # n x k
-
-    # 2) dot product matrix (p x k)
-    #C_num = SFc.T @ MPc   # p x k # 
-    C_num = SFc.T @ spaco.graphLaplacian @ MPc 
-
-    normalization = True
-    if normalization:
-        C_num = normalize(C_num, axis=0, norm='l2') # feature/ column normalization
-    
-    # clustering algorithm
-    leiden = True
-    if leiden:
-        # ---------------------------------------------------------
-        # 1. Compute cosine KNN graph
-        # ---------------------------------------------------------
-
-        # X: your data matrix (n_samples × n_features)
-        # choose your neighborhood size
-        n_neighbors = 10
-
-        nbrs = NearestNeighbors(
-            n_neighbors=n_neighbors,
-            metric="cosine"
-        ).fit(C_num)
-
-        distances, indices = nbrs.kneighbors(C_num)
-
-        # ---------------------------------------------------------
-        # 2. Build igraph graph with cosine similarity weights
-        # ---------------------------------------------------------
-
-        edges = []
-        weights = []
-
-        for i in range(indices.shape[0]):
-            for j, d in zip(indices[i], distances[i]):
-                if i != j:
-                    edges.append((i, j))
-                    weights.append(1 - d)   # cosine distance → similarity
-
-        g = ig.Graph(edges=edges, directed=False)
-        g.es["weight"] = weights
-
-        # ---------------------------------------------------------
-        # 3. Run Leiden clustering
-        # ---------------------------------------------------------
-
-        partition = la.find_partition(
-            g,
-            la.RBConfigurationVertexPartition,
-            weights=g.es["weight"],
-            resolution_parameter=1.0   # tune this for more/fewer clusters
-        )
-
-        labels = np.array(partition.membership)
-
-
-    # then do kmeans clustering if not leiden clustering 
-    kmeans = KMeans(n_clusters=C_num.shape[1], random_state=42)
-    labels = kmeans.fit_predict(C_num)
-    
-    # Umap reduction 
-    reducer = umap.UMAP(n_neighbors=10, min_dist=0.3, random_state=42)
-    F_umap = reducer.fit_transform(C_num)  # shape (p_features, 2)
-
-    # Use actual feature names 
-    feature_names = significant_feature_filtered.columns.tolist()
-
-        # Build DataFrame for Plotly
-    df = pd.DataFrame({
-            "UMAP1": F_umap[:, 0],
-            "UMAP2": F_umap[:, 1],
-            "Cluster": labels.astype(str),   # convert to string for discrete colors
-            "Feature": feature_names
-        })
-
-    # Create interactive scatter plot
-    fig = px.scatter(
-            df,
-            x="UMAP1", y="UMAP2",
-            color="Cluster",
-            hover_name="Feature",   # shows feature name on hover
-            title="Leiden + Normalized feature clustering",
-            labels={"UMAP1": "UMAP Dimension 1", "UMAP2": "UMAP Dimension 2"}
-        )
-
-    # Optional: tweak marker size and transparency
-    fig.update_traces(marker=dict(size=8, opacity=0.8, line=dict(width=0)))
-
-    # Show interactive plot
-    #fig.write_html('Kmeans_no_Normalization.html')
-    plot=True
-    if plot:
-        fig.show()
-
-    # mean loadings per label...first get cluster df 
-    cov_cluster_df = pd.DataFrame(
-        C_num, 
-        columns=[f'Spac-{i+1}' for i in range(C_num.shape[1])], 
-        index=significant_feature_filtered.columns.to_list()
-        )
-    cov_cluster_df['labels'] = labels
-    
-    # then get the actual average loading vectors 
-    avg_loadings = cov_cluster_df.groupby('labels').mean()
-
-    # matrix multiplication and then plot 
-    proj_Avgloadings = spaco_projections @ avg_loadings.values.T
-
-    # plot the projected average loadings
-    spaco.plot_spatial_heatmap(
-        proj_Avgloadings.loc[:,0], 
-        point_size=10, 
-        cmap='Spectral',
-        title="Avg_loading_projection_1"
-        )
+    # inspect the features in a specific cluster
+    spaco.feature_inspection_by_cluster(n_neighbors=5)

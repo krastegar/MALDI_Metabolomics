@@ -8,3 +8,11 @@ scipy
 scikit-image
 scikit-learn
 opencv-python
+scanpy
+torch
+plotly
+umap-learn
+leidenalg
+igraph
+tensorflow[and-cuda]
+stardist # still needs to be added to requirements.txt
