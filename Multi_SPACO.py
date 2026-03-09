@@ -424,6 +424,8 @@ class MultiModalRegistration(SpectrumData):
 
             # Find valid pixels in the current level
             valid    = (row_c >= 0) & (row_c < H) & (col_c >= 0) & (col_c < W)
+            
+            # flatten represenetation of the 2D mask for efficient indexing
             flat_idx = row_c[valid] * W + col_c[valid]  # (n_valid,)
 
             # Get sample feature values for valid pixels
