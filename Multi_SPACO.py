@@ -9,11 +9,13 @@ from stardist.models import StarDist2D
 from csbdeep.utils import normalize
 import tensorflow as tf
 import tifffile
+import scipy.sparse as sp
+import scanpy as sc
 from scipy import ndimage
 from skimage.measure import label as sk_label
 
 class MultiModalRegistration(SpectrumData):
-    def __init__(self, *args, use_gpu=True, **kwargs):
+    def __init__(self, *args, use_gpu=True, visium=False, maldi=False, **kwargs):
         super().__init__(*args, **kwargs)
         # Additional initialization for multimodal registration can go here
         # Configure GPU settings
@@ -47,30 +49,58 @@ class MultiModalRegistration(SpectrumData):
             tf.config.set_visible_devices([], 'GPU')
             print("GPU disabled. Running on CPU.")
 
-    def load_massi_spectrometry_data(self, full_data=False, sample_features=True):
+    def load_sparse_data(self) -> None:
         """
-        Loads mass spectrometry data from imzML file into SpectrumData object.
-
-        Parameters
-        ----------
-        full_data : bool, optional
-            If True, returns the full SpectrumData object dataframe and the coordinates of the samples.
-        sample_features : bool, optional
-            If True, returns the sample features matrix generated using the _sample_feature_genration method and the coordinates of the samples.
-
-        Returns
-        -------
-        If full_data is True, returns a tuple containing the SpectrumData object dataframe and a list of the coordinates of the samples.
-        If sample_features is True, returns a tuple containing the sample features matrix and a list of the coordinates of the samples.
+        Loads Visium spatial transcriptomics data from the specified path.
         """
+
+        if self.maldi: 
+            # Load the imzML file using pyimzML
+            spectra = [self.parser.getspectrum(idx) for idx in range(len(self.parser.coordinates))]
+            
+            # grab the m/z and intensity values for each spectrum
+            mzs = [s[0] for s in spectra]
+            intensities = [s[1] for s in spectra]
+
+            # Get coordinates
+            coords = np.array(self.parser.coordinates)
+            self.coords = coords[:, :2]  # Keep only x and y
+            
+            # Concatenate all m/z and intensity arrays to build the COO matrix
+            all_mzs = np.concatenate(mzs) # makes all m/z values in one array, same / intsensity
+            all_intensities = np.concatenate(intensities)
+
+            # Build row indices: repeat each sample index by its spectrum length
+            row_indices = np.repeat(np.arange(len(mzs)), [len(m) for m in mzs])
+
+            # Get unique m/z values and mapping
+            unique_mzs, col_indices = np.unique(all_mzs, return_inverse=True)
+            
+            # Build COO matrix
+            coo = sp.coo_matrix((all_intensities, (row_indices, col_indices)),
+                                shape=(len(mzs), len(unique_mzs)))
+            
+            sparse_SF = coo.tocsr()  # Convert to CSR format for efficient row slicing
+            return sparse_SF
         
-        # transform to full dataframe
-        if full_data: 
-            return self.df, [coords[:2] for coords in self.df['coordinates']]
+        elif self.visium:
+            
+            # read the 10x Genomics Visium data using Scanpy
+            adata = sc.read_10x_h5(self.data_path)
+
+            # make this a sparse matrix
+            sparse_SF = sp.csr_matrix(adata.X)
+
+            return sparse_SF
         
-        # transform to sample features matrix 
-        if sample_features: 
-            return self._sample_feature_genration(agg_func="sum"), [coords[:2] for coords in self.df['coordinates']]
+        else: 
+            raise ValueError("Please specify either MALDI or Visium data to load.")
+
+        
+    def load_visium_data(self, full_data=True, sample_features=True):
+        """
+        Loads Visium spatial transcriptomics data from the specified path.
+        """
         
     def load_normalize_HE(self, he_path: str):
         """
@@ -206,6 +236,7 @@ class MultiModalRegistration(SpectrumData):
 
         # coerce list of tuples → DataFrame
         if isinstance(coords, list):
+            # only for maldi....this needs updated for visium 
             coords = pd.DataFrame(coords, columns=['x', 'y', 'z'][:len(coords[0])])[['x', 'y']]
 
         elif isinstance(coords, pd.DataFrame):
@@ -234,9 +265,14 @@ class MultiModalRegistration(SpectrumData):
         W0 = int(max_y - min_y + 1)
 
         # create the mask
+        # deal with potential non-integer coordinates by flooring to the nearest integer (assuming coordinates are pixel centers)
         rows = (coords['x'].to_numpy() - min_x).astype(np.int32)
         cols = (coords['y'].to_numpy() - min_y).astype(np.int32)
 
+        # x_range, y_range = np.arange(min_x, max_x + 1), np.arange(min_y, max_y + 1)
+        # rows = np.floor(coords['x'].to_numpy() - min_x).astype(np.int32)
+        # cols = np.floor(coords['y'].to_numpy() - min_y).astype(np.int32)
+        # M0 = np.zeros((rows, cols), dtype=np.uint8)
         M0 = np.zeros((H0, W0), dtype=np.uint8)
         M0[rows, cols] = 1
 
@@ -279,7 +315,7 @@ class MultiModalRegistration(SpectrumData):
         M_coarse = (child_counts >= 2)
         
         # Enforce 8-connectivity by keeping only the largest connected component
-        label_connectivity = sk_label(M_coarse, connectivity=2)
+        label_connectivity = sk_label(M_coarse, connectivity=2) # connectivity=2 for 8-connectivity
         
         # Count the number of pixels in each connected component
         bincount = np.bincount(label_connectivity.flat)
@@ -413,7 +449,7 @@ class MultiModalRegistration(SpectrumData):
         for level, mask in pyramid_masks.items():
             # Get dimensions of the current level mask
             H, W  = mask.shape
-            
+
             # Compute the scaling factor for the current level (2^level)
             # This is used to compute the coarse row and column indices
             scale = 2 ** level
@@ -423,7 +459,7 @@ class MultiModalRegistration(SpectrumData):
             col_c = fine_col // scale
 
             # Find valid pixels in the current level
-            valid    = (row_c >= 0) & (row_c < H) & (col_c >= 0) & (col_c < W)
+            valid  = (row_c >= 0) & (row_c < H) & (col_c >= 0) & (col_c < W)
             
             # flatten represenetation of the 2D mask for efficient indexing
             flat_idx = row_c[valid] * W + col_c[valid]  # (n_valid,)
@@ -456,6 +492,7 @@ class MultiModalRegistration(SpectrumData):
             pyramid_data[level] = log_means            # (H, W, n_features)
 
         return pyramid_data
+    
     def plot_pyramid_qc(
         self,
         pyramid_data: dict,

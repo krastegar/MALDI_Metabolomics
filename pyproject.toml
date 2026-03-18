@@ -78,6 +78,7 @@ dependencies = [
     "pillow==12.1.0",
     "plotly==6.5.2",
     "protobuf==6.33.4",
+    "pyarrow>=23.0.1",
     "pygments==2.19.2",
     "pyimzml==1.5.5",
     "pynndescent==0.6.0",
