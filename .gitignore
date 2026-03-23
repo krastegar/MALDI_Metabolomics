@@ -224,3 +224,5 @@ img_folder/
 .local/
 .sh_history
 .sudo_as_admin_successful
+.vscode/
+*.lock
