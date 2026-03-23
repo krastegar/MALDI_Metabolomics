@@ -520,3 +520,4 @@ if __name__ == "__main__":
     sparse_matrix_visium = data_loader_visium.load_sparse_data()
     print(sparse_matrix_visium.shape)
 
+
