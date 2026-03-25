@@ -18,8 +18,10 @@ import numpy  as np
 import pandas as pd
 import scipy.sparse as sp
 import scanpy as sc
-
-
+import napari
+from skimage import io
+import matplotlib.cm as mcm
+import matplotlib.colors as mcolors
 
 # =============================================================================
 # 1. DATA LOADING
@@ -69,28 +71,46 @@ def load_visium(data_path: str) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
 # =============================================================================
 # 2. BASE MASK (level 0)
 # =============================================================================
-
+ 
 def build_base_mask(coords: np.ndarray, is_float: bool = False) -> tuple[sp.csr_matrix, np.ndarray]:
     """
     Build binary CSR mask M0 and discretized grid coords from raw spot coordinates.
     For MALDI: coords are already integers. For Visium: discretize via median NN distance.
-    Returns M0 (H, W) and grid_coords (n_spots, 2) as int32.
+ 
+    Returns
+    -------
+    M0          : sp.csr_matrix  binary mask (H, W)
+    grid_coords : np.ndarray     zero-based integer grid indices (n_spots, 2)
+    coord_info  : dict           offset and resolution needed to map back to raw pixel space
+                  {
+                    'offset'     : (row_min, col_min) in raw pixel coords,
+                    'resolution' : bin size in raw pixel units (1.0 for MALDI),
+                  }
     """
     if is_float:
         # Infer bin size from median nearest-neighbour distance (O(n log n) via KDTree C backend)
         distances, _ = KDTree(coords).query(coords, k=2)
-        resolution   = np.median(distances[:, 1])
+        resolution   = float(np.median(distances[:, 1]))
         print(f"Inferred resolution: {resolution:.4f}px")
-        grid_coords  = np.floor((coords - coords.min(axis=0)) / resolution).astype(np.int32)
+        offset       = coords.min(axis=0)                    # (row_min, col_min) in pixel space
+        grid_coords  = np.floor((coords - offset) / resolution).astype(np.int32)
     else:
-        grid_coords  = coords.astype(np.int32)
-
-    # Build sparse binary mask directly from grid coords — O(n)
-    rows, cols = grid_coords[:, 0], grid_coords[:, 1]
+        resolution   = 1.0
+        offset       = coords.min(axis=0).astype(np.float64)
+        grid_coords  = (coords - coords.min(axis=0)).astype(np.int32)
+ 
+    # coords[:, 0] = pxl_col, coords[:, 1] = pxl_row
+    # grid rows = pxl_row direction, grid cols = pxl_col direction
+    rows = grid_coords[:, 1]   # pxl_row -> grid row
+    cols = grid_coords[:, 0]   # pxl_col -> grid col
     M0 = sp.coo_matrix((np.ones(len(rows), dtype=np.uint8), (rows, cols)),
                        shape=(rows.max() + 1, cols.max() + 1)).tocsr()
-    return M0, grid_coords
-
+ 
+    # Update grid_coords to (row, col) convention — consistent with mask
+    grid_coords = np.column_stack([rows, cols]).astype(np.int32)
+ 
+    coord_info = {'offset': offset, 'resolution': resolution}
+    return M0, grid_coords, coord_info
 
 # =============================================================================
 # 3. PYRAMID MASK CONSTRUCTION
@@ -340,13 +360,13 @@ def solve_spaco_level(Y: sp.csr_matrix, coords: np.ndarray, keigs: int = 50,
 
 def run_multiscale_spaco(levels: dict[int, dict], keigs: int = 50,
                          b: int = 64, niter: int = 8,
-                         seed: int = 42,
-                         fine_b: int = None) -> dict[int, dict]:
+                         seed: int = 42) -> dict[int, dict]:
     """
     Run SpaCo coarsest -> finest, using each level's eigvecs to warm-start the next.
     Populates 'eigvals', 'eigvecs', 'mu' in each level dict.
     fine_b: override block size at the finest level to reduce memory (default: b // 2).
     """
+
     init_vecs = None
     finest    = min(levels.keys())
     for lvl in sorted(levels.keys(), reverse=True):   # coarsest first
@@ -357,11 +377,11 @@ def run_multiscale_spaco(levels: dict[int, dict], keigs: int = 50,
         Y         = d['data'][tissue].astype(np.float32)
         coords    = np.column_stack([tissue // W, tissue % W]).astype(np.float64)
         # Reduce block size at finest level to fit in RAM
-        level_b   = (fine_b if fine_b is not None else max(keigs + 2, b // 2)) if lvl == finest else b
+        #level_b   = (fine_b if fine_b is not None else max(keigs + 2, b // 2)) if lvl == finest else b
 
-        print(f"Solving level {lvl} | tissue spots: {len(tissue):,} | block size: {level_b}")
+        print(f"Solving level {lvl} | tissue spots: {len(tissue):,} | block size: {b}")
         eigvals, eigvecs, mu = solve_spaco_level(Y, coords, keigs=keigs,
-                                                  b=level_b, niter=niter,
+                                                  b=b, niter=niter,
                                                   init_vecs=init_vecs, seed=seed + lvl)
         # Compute and store scores (n_tissue, keigs) before freeing data
         # S = Y_c @ V = Y @ V - mu*(1^T V) — stored in spot space for plotting
@@ -474,6 +494,90 @@ def plot_spaco(levels: dict[int, dict],
     plt.show()
 
 # =============================================================================
+# 7. COORDINATE MAPPING — project coarse scores back to fine grid
+# =============================================================================
+ 
+def visium_grid_to_he_coords(tissue_idx: np.ndarray, grid_shape: tuple,
+                             coord_info: dict, lvl: int = 0) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Convert pyramid tissue indices to H&E pixel coordinates.
+
+    Parameters
+    ----------
+    tissue_idx : np.ndarray  flat grid indices of tissue spots
+    grid_shape : (H, W)      grid dimensions at this level
+    coord_info : dict        output of build_base_mask — offset and resolution
+    lvl        : int         pyramid level (used to scale back to full resolution)
+
+    Returns
+    -------
+    he_row, he_col : np.ndarray  exact pixel coordinates in H&E image space
+    """
+    H, W       = grid_shape
+    scale      = 2 ** lvl
+    offset     = coord_info['offset']
+    resolution = coord_info['resolution']
+
+    # % W = row direction (pxl_row), // W = col direction (pxl_col)
+    he_row = (tissue_idx  % W).astype(np.float32) * scale * resolution + offset[1]
+    he_col = (tissue_idx // W).astype(np.float32) * scale * resolution + offset[0]
+
+    return he_row, he_col
+
+# =============================================================================
+# Napari overlay function — Optional 
+# =============================================================================
+def spaco_scores_to_napari_points(level_data: dict, coord_info: dict,
+                                  he_path: str, n_components: int = 9,
+                                  n_points: int = None, opacity: float = 0.5,
+                                  point_size: int = 1) -> None:
+    """
+    Overlay SpaCo scores on H&E image in Napari.
+
+    Parameters
+    ----------
+    level_data    : single level dict from levels[lvl]
+    coord_info    : output of build_base_mask
+    he_path       : path to tissue_hires_image.png
+    n_components  : number of SpaCo components to add as layers
+    n_points      : if not None, subsample every n_points-th spot for faster rendering
+    """
+    import napari
+    from skimage.io import imread
+
+    tissue = level_data['tissue_idx']
+    H, W   = level_data['grid_shape']
+    pcs    = level_data['scores']
+
+    he_row, he_col = visium_grid_to_he_coords(tissue, (H, W), coord_info)
+    points = np.column_stack([he_row, he_col])
+
+    # Subsample if requested — every n_points-th spot
+    if n_points is not None:
+        points = points[::n_points]
+        pcs    = pcs[::n_points]
+
+    print(f"Rendering {len(points):,} points")
+
+    he_img = imread(he_path)
+    viewer = napari.Viewer()
+    viewer.add_image(he_img, name="H&E")
+
+    for i in range(min(pcs.shape[1], n_components)):
+        viewer.add_points(
+            points,
+            features={'score': pcs[:, i]},
+            face_color='score',
+            face_colormap='Spectral',
+            size=point_size,
+            opacity=opacity,
+            name=f"SpaC {i+1}",
+            visible=(i == 0),
+            blending='translucent'
+        )
+
+    napari.run()
+# =============================================================================
 # PIPELINE ENTRY POINT
 # =============================================================================
 
@@ -489,10 +593,14 @@ if __name__ == "__main__":
 
     # --- Visium HD ---
     X, coords, features = load_visium("MSI_data_grant/cellranger/329537/outs/binned_outputs/square_002um/")
-    M0, grid_coords     = build_base_mask(coords, is_float=True)
+    M0, grid_coords, coord_info = build_base_mask(coords, is_float=True)
     levels              = build_pyramid_masks(M0, target_max=10_000, plot=True)
     levels              = aggregate_pyramid(X, grid_coords, levels, data_type='visium')
     subset_levels =  {k: v for k, v in sorted(levels.items()) if k >= 1}  # skip finest level to save memory
     levels              = run_multiscale_spaco(subset_levels, keigs=20, b=32, niter=10)
     #levels              = run_multiscale_spaco(levels, keigs=20, b=32, niter=10)
     plot_spaco(levels, component=0, invert_y=True)
+
+    # call to napari overlay function — adjust n_points for faster rendering if needed
+    full_pyramid = np.load("full_data_pyramid.npy", allow_pickle=True).item()
+    spaco_scores_to_napari_points(level_data = full_pyramid[0], coord_info=coord_info, he_path='MSI_data_grant/cellranger/329537/outs/binned_outputs/square_002um/spatial/tissue_hires_image.png', n_points=2, opacity=0.6, point_size=1.5)
