@@ -17,6 +17,7 @@ from skimage import transform, filters
 from pyimzml.ImzMLParser import ImzMLParser
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+import plotly.express as px
 import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
@@ -542,88 +543,105 @@ class MALDIRegistration:
         
         return mapping_df
     
-    def visualize_coordinate_mapping(self):
+    def visualize_coordinate_mapping(self, pixel_size_um=2.0):
         """
         Visualize the coordinate transformation as a vector field and grid deformation.
-        Interactive Plotly version.
+        Interactive Plotly version. Axes are displayed in µm.
+
+        Parameters
+        ----------
+        pixel_size_um : float
+            Physical size of one pixel in micrometres (default=2.0 µm).
+            Used to convert pixel coordinates to µm on all axes.
         """
         print(f"\nGenerating coordinate mapping visualization...")
         tissue_coords = np.asarray([coords[:2] for coords in self.maldi_df['coordinates']])
         he_grid = self.transform_maldi_to_he_coordinates(tissue_coords)
-        # Reshape for grid visualization
-        he_grid_x = he_grid[:, 0]
-        he_grid_y = he_grid[:, 1]
-        
-        # Calculate displacement vectors (from affine-transformed position to final position)
-        # First get affine-only transformation
-        # Use tissue_coords (same source as he_grid) to ensure matching shapes
+
+        # Affine-only positions (non-rigid displacement starts here)
         maldi_grid_homogeneous = np.column_stack([tissue_coords, np.ones(len(tissue_coords))])
         affine_only = (self.refined_affine @ maldi_grid_homogeneous.T).T[:, :2]
-        
-        # Displacement is the NON-RIGID component only
-        PIXEL_SIZE_UM = 2.0  # each pixel = 2 µm (2x2 µm pixel size)
+
+        # Non-rigid displacement in µm
         displacement = he_grid - affine_only
-        displacement_mag_px = np.sqrt(displacement[:, 0]**2 + displacement[:, 1]**2)
-        displacement_mag = displacement_mag_px * PIXEL_SIZE_UM  # convert to µm
+        displacement_mag = np.sqrt(displacement[:, 0]**2 + displacement[:, 1]**2) * pixel_size_um
         max_displacement = np.max(displacement_mag)
-        
-        # Subsample points for clearer visualization (show only half the points)
-        subsample_indices = np.random.choice(len(he_grid_x), size=len(he_grid_x)//2, replace=False)
-        
+
+        # ------------------------------------------------------------------ #
+        # Convert everything to µm before passing to Plotly.                  #
+        # px.imshow with explicit x/y ranges renders the image in µm space,   #
+        # so all scatter coordinates must also be in µm to overlay correctly.  #
+        # ------------------------------------------------------------------ #
+        he_h_px, he_w_px = self.he_shape
+        x_range_um = [0, he_w_px * pixel_size_um]
+        y_range_um = [0, he_h_px * pixel_size_um]
+
+        # All scatter data converted to µm
+        he_grid_um     = he_grid     * pixel_size_um   # shape (N, 2)
+        affine_only_um = affine_only * pixel_size_um   # shape (N, 2)
+        landmarks_um   = self.he_landmarks * pixel_size_um
+
+        # Summary displacement stats (mean & median of non-rigid shift in µm)
+        mean_displacement   = float(np.mean(displacement_mag))
+        median_displacement = float(np.median(displacement_mag))
+
+        # Subsample scatter points for performance
+        subsample_indices = np.random.choice(len(he_grid_um), size=len(he_grid_um)//2, replace=False)
+
         fig = make_subplots(
             rows=1, cols=2,
-            subplot_titles=('MALDI Grid Deformed to H&E Space<br>(Shows where MALDI spots map to)',
-                        f'Non-Rigid Displacement Vectors<br>(Max: {max_displacement:.1f} µm)'),
+            subplot_titles=(
+                'MALDI Grid Deformed to H&E Space<br>(Shows where MALDI spots map to)',
+                f'Non-Rigid Displacement Vectors<br>'
+                f'Mean: {mean_displacement:.1f} µm  |  Median: {median_displacement:.1f} µm'
+            ),
             horizontal_spacing=0.1
         )
-        
-        # Left plot: Deformed grid overlay on H&E
-        # Add H&E image
-        fig.add_trace(
-            go.Image(z=self.he_image),
-            row=1, col=1
-        )
-        
-        # Add MALDI points (subsampled)
+
+        # ---- Background H&E image rendered in µm space ---- #
+        # go.Image supports x0/y0/dx/dy which place it in physical coordinates
+        # while preserving the correct top-left origin and RGB colour.
+        for col in [1, 2]:
+            fig.add_trace(
+                go.Image(
+                    z=self.he_image,
+                    x0=0, y0=0,
+                    dx=pixel_size_um, dy=pixel_size_um,
+                    hovertemplate='X: %{x:.1f} µm<br>Y: %{y:.1f} µm<extra>H&E</extra>'
+                ),
+                row=1, col=col
+            )
+
+        # ---- Left plot: deformed MALDI grid overlaid on H&E ---- #
         fig.add_trace(
             go.Scatter(
-                x=he_grid_x[subsample_indices],
-                y=he_grid_y[subsample_indices],
+                x=he_grid_um[subsample_indices, 0],
+                y=he_grid_um[subsample_indices, 1],
                 mode='markers',
-                marker=dict(color='blue', size=3, opacity=0.1),
+                marker=dict(color='blue', size=3, opacity=0.15),
                 name='MALDI points',
-                hovertemplate='MALDI point<br>X: %{x:.1f}<br>Y: %{y:.1f}<extra></extra>'
+                hovertemplate='MALDI point<br>X: %{x:.1f} µm<br>Y: %{y:.1f} µm<extra></extra>',
             ),
             row=1, col=1
         )
-        
-        # Add H&E landmarks
+
         fig.add_trace(
             go.Scatter(
-                x=self.he_landmarks[:, 0],
-                y=self.he_landmarks[:, 1],
+                x=landmarks_um[:, 0],
+                y=landmarks_um[:, 1],
                 mode='markers',
-                marker=dict(color='green', size=8, 
-                        line=dict(color='white', width=2)),
+                marker=dict(color='lime', size=10, line=dict(color='white', width=2)),
                 name='H&E landmarks',
-                hovertemplate='Landmark<br>X: %{x:.1f}<br>Y: %{y:.1f}<extra></extra>'
+                hovertemplate='Landmark<br>X: %{x:.1f} µm<br>Y: %{y:.1f} µm<extra></extra>',
             ),
             row=1, col=1
         )
-        
-        # Right plot: Non-rigid displacement vectors
-        # Add H&E image
-        fig.add_trace(
-            go.Image(z=self.he_image),
-            row=1, col=2
-        )
-        
-        # Only show vectors where there's significant non-rigid deformation (threshold in µm)
-        mask = displacement_mag > 2.0  # 2 µm = 1 pixel minimum
-        
+
+        # ---- Right plot: non-rigid displacement vectors in µm ---- #
+        mask = displacement_mag > 2.0  # threshold: > 1 pixel
+
         if np.any(mask):
-            # Subsample displacement vectors for performance
-            vector_subsample = min(500, np.sum(mask))  # Show max 500 vectors
+            vector_subsample = min(500, np.sum(mask))
             if np.sum(mask) > vector_subsample:
                 mask_indices = np.where(mask)[0]
                 selected_indices = np.random.choice(mask_indices, size=vector_subsample, replace=False)
@@ -631,22 +649,17 @@ class MALDIRegistration:
                 vector_mask[selected_indices] = True
             else:
                 vector_mask = mask
-            
-            # Normalize displacement magnitudes to [0, 1] for colormap
+
             norm_disp = (displacement_mag[vector_mask] - displacement_mag[vector_mask].min()) / \
                         (displacement_mag[vector_mask].max() - displacement_mag[vector_mask].min() + 1e-10)
-            
-            # Use matplotlib's Spectral colormap to get RGB colors
+
             colormap = cm.get_cmap('Spectral')
-            colors = [f'rgb({int(r*255)},{int(g*255)},{int(b*255)})' 
-                    for r, g, b, _ in colormap(norm_disp)]
-            
-            # Add displacement vectors as individual scatter traces
+            colors = [f'rgb({int(r*255)},{int(g*255)},{int(b*255)})'
+                      for r, g, b, _ in colormap(norm_disp)]
+
             for idx, i in enumerate(np.where(vector_mask)[0]):
-                # Start and end points of arrow
-                x_start, y_start = affine_only[i, 0], affine_only[i, 1]
-                x_end, y_end = he_grid[i, 0], he_grid[i, 1]
-                
+                x_start, y_start = affine_only_um[i]
+                x_end,   y_end   = he_grid_um[i]
                 fig.add_trace(
                     go.Scatter(
                         x=[x_start, x_end],
@@ -654,41 +667,38 @@ class MALDIRegistration:
                         mode='lines',
                         line=dict(color=colors[idx], width=2),
                         showlegend=False,
-                        hovertemplate=f'Displacement: {displacement_mag[i]:.2f} µm<extra></extra>'
+                        hovertemplate=(
+                            f'Start: ({x_start:.1f}, {y_start:.1f}) µm<br>'
+                            f'End:   ({x_end:.1f}, {y_end:.1f}) µm<br>'
+                            f'Displacement: {displacement_mag[i]:.2f} µm<extra></extra>'
+                        ),
                     ),
                     row=1, col=2
                 )
-            
-            # Add arrowheads with colorbar
+
             fig.add_trace(
                 go.Scatter(
-                    x=he_grid[vector_mask, 0],
-                    y=he_grid[vector_mask, 1],
+                    x=he_grid_um[vector_mask, 0],
+                    y=he_grid_um[vector_mask, 1],
                     mode='markers',
                     marker=dict(
                         color=displacement_mag[vector_mask],
                         colorscale='Spectral',
                         size=6,
                         symbol='arrow',
-                        colorbar=dict(
-                            title='Displacement (µm)',
-                            x=1.15,
-                            len=0.5,
-                            y=0.5
-                        ),
+                        colorbar=dict(title='Displacement (µm)', x=1.15, len=0.5, y=0.5),
                         showscale=True
                     ),
                     name='Displacement',
-                    hovertemplate='Displacement: %{marker.color:.2f} µm<extra></extra>'
+                    hovertemplate='X: %{x:.1f} µm<br>Y: %{y:.1f} µm<br>Displacement: %{marker.color:.2f} µm<extra></extra>'
                 ),
                 row=1, col=2
             )
         else:
-            # Add text if no significant displacement
             fig.add_annotation(
                 text='No significant non-rigid displacement<br>(all < 2.0 µm)',
                 xref='x4', yref='y4',
-                x=0.5, y=0.5,
+                x=np.mean(x_range_um), y=np.mean(y_range_um),
                 xanchor='center', yanchor='middle',
                 showarrow=False,
                 font=dict(size=14),
@@ -696,12 +706,14 @@ class MALDIRegistration:
                 opacity=0.8,
                 row=1, col=2
             )
-        
-        # Update layout
-        fig.update_xaxes(title_text='H&E X (pixels)', row=1, col=1)
-        fig.update_yaxes(title_text='H&E Y (pixels)', row=1, col=1, scaleanchor='x', scaleratio=1)
-        fig.update_xaxes(title_text='X (pixels)', row=1, col=2)
-        fig.update_yaxes(title_text='Y (pixels)', row=1, col=2, scaleanchor='x2', scaleratio=1)
+
+        # ---- Axis formatting — native µm, y-axis reversed to match image convention ---- #
+        for col in [1, 2]:
+            fig.update_xaxes(title_text='H&E X (µm)', range=x_range_um, row=1, col=col)
+            fig.update_yaxes(title_text='H&E Y (µm)', range=y_range_um,
+                             autorange='reversed',
+                             scaleanchor=f'x{col if col > 1 else ""}',
+                             scaleratio=1, row=1, col=col)
         
         fig.update_layout(
             height=700,
@@ -715,14 +727,363 @@ class MALDIRegistration:
         fig.write_html('coordinate_mapping_accuracy.html')
         print(f"Saved interactive coordinate mapping visualization to 'coordinate_mapping_accuracy.html'")
         print(f"\nRegistration Accuracy:")
-        print(f"  Max non-rigid displacement: {max_displacement:.1f} µm")
-        print(f"  Showing {len(subsample_indices)} of {len(he_grid_x)} total MALDI points")
+        print(f"  Mean non-rigid displacement  : {mean_displacement:.1f} µm")
+        print(f"  Median non-rigid displacement: {median_displacement:.1f} µm")
+        print(f"  Showing {len(subsample_indices)} of {len(he_grid_um)} total MALDI points")
         if np.any(mask):
             print(f"  Showing {np.sum(vector_mask)} displacement vectors")
         
         fig.show()
-        # ========== END NEW METHODS ==========
-    
+
+    def visualize_mi_heatmap(self, patch_size=64, n_bins=32,
+                             pixel_size_um=2.0, output_path='mi_heatmap.html'):
+        """
+        Compute and visualise a spatial map of local NMI between the registered
+        MALDI image and the H&E image, sampled at actual tissue spot locations.
+
+        For each MALDI spot (transformed to H&E space), a patch of size
+        `patch_size` × `patch_size` pixels is extracted from both images and
+        NMI is computed. Only spots where a full patch fits within the image
+        bounds are scored. The result is overlaid on the H&E grayscale in the
+        same orientation as visualize_results().
+
+        Parameters
+        ----------
+        patch_size : int
+            Side length of the patch in pixels (default=64).
+            Smaller → finer per-spot detail but noisier estimates.
+        n_bins : int
+            Number of intensity bins for the joint histogram (default=32).
+        pixel_size_um : float
+            Physical pixel size in µm (default=2.0).
+        output_path : str
+            File path for the saved interactive HTML figure.
+        """
+        if self.registered_nonrigid is None:
+            raise RuntimeError("Run the full pipeline before calling visualize_mi_heatmap().")
+
+        print("\nComputing local NMI heatmap...")
+
+        he    = self.he_gray
+        maldi = self.registered_nonrigid
+        eps   = 1e-10
+
+        def _patch_nmi(patch_a, patch_b, n_bins):
+            """NMI = 2*MI / (H(A)+H(B)), strictly in [0,1]."""
+            hist2d, _, _ = np.histogram2d(
+                patch_a.ravel(), patch_b.ravel(),
+                bins=n_bins, range=[[0, 1], [0, 1]]
+            )
+            hist2d = hist2d / (hist2d.sum() + eps)  # proper joint probability
+            p_a  = hist2d.sum(axis=1)
+            p_b  = hist2d.sum(axis=0)
+            h_a  = -np.sum(p_a    * np.log(p_a    + eps))
+            h_b  = -np.sum(p_b    * np.log(p_b    + eps))
+            h_ab = -np.sum(hist2d * np.log(hist2d + eps))
+            mi   = h_a + h_b - h_ab
+            return 2.0 * mi / (h_a + h_b + eps)
+
+        # ------------------------------------------------------------------ #
+        # Use tissue-only MALDI spot coordinates as patch centres.            #
+        # These are the actual measured spots — no grid, no background.       #
+        # ------------------------------------------------------------------ #
+        tissue_coords = np.asarray([coords[:2] for coords in self.maldi_df['coordinates']])
+        # Transform to H&E pixel space so patches align with the registered image
+        he_coords = self.transform_maldi_to_he_coordinates(tissue_coords)
+
+        he_h_px, he_w_px = self.he_shape
+        half = patch_size // 2
+
+        centres_x, centres_y, nmi_scores = [], [], []
+
+        for (cx_f, cy_f) in he_coords:
+            cx, cy = int(round(cx_f)), int(round(cy_f))
+            # Skip spots too close to the image border for a full patch
+            if cx < half or cy < half or cx + half > he_w_px or cy + half > he_h_px:
+                continue
+            pa = he   [cy-half:cy+half, cx-half:cx+half]
+            pb = maldi[cy-half:cy+half, cx-half:cx+half]
+            nmi = _patch_nmi(pa, pb, n_bins)
+            centres_x.append(cx)
+            centres_y.append(cy)
+            nmi_scores.append(nmi)
+
+        centres_x  = np.array(centres_x,  dtype=float)
+        centres_y  = np.array(centres_y,  dtype=float)
+        nmi_scores = np.array(nmi_scores)
+
+        print(f"  Scored {len(nmi_scores)} tissue spots  "
+              f"(patch={patch_size}px = {patch_size*pixel_size_um:.0f} µm)")
+        print(f"  NMI range: {nmi_scores.min():.4f} – {nmi_scores.max():.4f}")
+
+        # Convert to µm
+        centres_x_um = centres_x * pixel_size_um
+        centres_y_um = centres_y * pixel_size_um
+        x_range_um   = [0, he_w_px * pixel_size_um]
+        y_range_um   = [0, he_h_px * pixel_size_um]
+
+        # ------------------------------------------------------------------ #
+        # Background: grayscale H&E via go.Heatmap with y descending so that  #
+        # row 0 is at the top — matching matplotlib imshow convention used in  #
+        # visualize_results().                                                 #
+        # ------------------------------------------------------------------ #
+        x_coords_um = np.linspace(0, he_w_px * pixel_size_um, he_w_px)
+        # Descending y so row 0 maps to the top of the plot
+        y_coords_um = np.linspace(0, he_h_px * pixel_size_um, he_h_px)
+
+        fig = go.Figure()
+
+        fig.add_trace(
+            go.Heatmap(
+                z=he,
+                x=x_coords_um,
+                y=y_coords_um,
+                colorscale='gray',
+                showscale=False,
+                hovertemplate='X: %{x:.1f} µm<br>Y: %{y:.1f} µm<extra>H&E</extra>',
+                name='H&E'
+            )
+        )
+
+        # NMI scores overlaid on tissue spots
+        marker_size = max(4, int(patch_size * pixel_size_um /
+                                 (he_w_px * pixel_size_um / 800)))
+
+        fig.add_trace(
+            go.Scatter(
+                x=centres_x_um,
+                y=centres_y_um,
+                mode='markers',
+                marker=dict(
+                    color=nmi_scores,
+                    colorscale='Spectral',
+                    cmin=0.0,
+                    cmax=1.0,
+                    size=marker_size,
+                    opacity=0.8,
+                    symbol='square',
+                    colorbar=dict(
+                        title='NMI (0–1)',
+                        thickness=18,
+                        len=0.75,
+                        tickformat='.2f',
+                    ),
+                    showscale=True,
+                    line=dict(width=0),
+                ),
+                name='Local NMI',
+                hovertemplate=(
+                    'X: %{x:.1f} µm<br>'
+                    'Y: %{y:.1f} µm<br>'
+                    'NMI: %{marker.color:.4f}<extra></extra>'
+                ),
+            )
+        )
+
+        # y-axis reversed so row 0 is at top, matching imshow orientation
+        fig.update_xaxes(title_text='H&E X (µm)', range=x_range_um)
+        fig.update_yaxes(title_text='H&E Y (µm)',
+                         range=y_range_um,
+                         autorange='reversed',
+                         scaleanchor='x', scaleratio=1)
+
+        fig.update_layout(
+            title=dict(
+                text=(f'Local NMI — MALDI vs H&E (tissue spots only)<br>'
+                      f'<sup>patch={patch_size}px ({patch_size*pixel_size_um:.0f} µm)</sup>'),
+                x=0.5
+            ),
+            height=750,
+            width=900,
+            hovermode='closest',
+        )
+
+        fig.write_html(output_path)
+        print(f"  Saved NMI heatmap to '{output_path}'")
+        fig.show()
+
+    def compute_registration_metrics(self, pixel_size_um=2.0, verbose=True):
+        """
+        Compute quantitative metrics to evaluate registration quality.
+
+        Metrics are computed at three stages (where available):
+          - Pre-registration (raw overlap)
+          - Post-affine
+          - Post-non-rigid
+
+        Parameters
+        ----------
+        pixel_size_um : float
+            Physical size of one pixel in micrometres (default=2.0 µm).
+            Used to convert displacement magnitudes to µm.
+        verbose : bool
+            If True, print a formatted summary table to stdout.
+
+        Returns
+        -------
+        metrics : dict
+            Nested dict with keys 'pre', 'affine', 'nonrigid'.
+            Each stage contains:
+
+            nmi : float
+                Normalised Mutual Information between H&E and registered MALDI
+                (computed only over the tissue overlap mask).
+                Higher is better; 1.0 = perfect statistical dependency.
+
+            edge_correlation : float
+                Pearson correlation between Sobel edge maps of both images.
+                Modality-agnostic structural similarity.
+                Higher is better; 1.0 = perfect edge alignment.
+
+            ssim : float
+                Structural Similarity Index on the edge maps.
+                Higher is better; 1.0 = identical structure.
+
+            displacement_stats : dict  (nonrigid stage only)
+                mean_um, std_um, max_um, pct_folding:
+                  - mean/std/max: displacement field magnitude statistics in µm.
+                  - pct_folding: % of pixels where Jacobian det < 0 (impossible
+                    warps); should be 0.0 for a valid deformation field.
+        """
+        from skimage.metrics import structural_similarity as ssim_fn
+
+        # ------------------------------------------------------------------ #
+        # Helper: Normalised Mutual Information                                #
+        # ------------------------------------------------------------------ #
+        def _nmi(img_a, img_b, mask=None, n_bins=64):
+            """NMI = 2 * MI(A,B) / (H(A) + H(B)), computed over masked region.
+            Values are strictly in [0, 1]: 0 = independent, 1 = perfectly dependent.
+            """
+            a = img_a[mask] if mask is not None else img_a.ravel()
+            b = img_b[mask] if mask is not None else img_b.ravel()
+            eps = 1e-10
+            # Joint histogram — density=False then normalise so values sum to 1
+            hist_2d, _, _ = np.histogram2d(a, b, bins=n_bins)
+            hist_2d = hist_2d / (hist_2d.sum() + eps)   # proper joint probability
+            # Marginals
+            p_a = hist_2d.sum(axis=1)
+            p_b = hist_2d.sum(axis=0)
+            # Entropies
+            h_a  = -np.sum(p_a     * np.log(p_a     + eps))
+            h_b  = -np.sum(p_b     * np.log(p_b     + eps))
+            h_ab = -np.sum(hist_2d * np.log(hist_2d + eps))
+            mi = h_a + h_b - h_ab
+            return 2.0 * mi / (h_a + h_b + eps)
+
+        # ------------------------------------------------------------------ #
+        # Helper: Edge-map correlation + SSIM                                  #
+        # ------------------------------------------------------------------ #
+        def _edge_metrics(img_a, img_b, mask=None):
+            edges_a = filters.sobel(img_a)
+            edges_b = filters.sobel(img_b)
+            if mask is not None:
+                ea = edges_a[mask]
+                eb = edges_b[mask]
+            else:
+                ea, eb = edges_a.ravel(), edges_b.ravel()
+            corr = float(np.corrcoef(ea, eb)[0, 1])
+            # SSIM on full edge maps (requires same shape)
+            data_range = max(edges_a.max(), edges_b.max()) - min(edges_a.min(), edges_b.min())
+            sim = ssim_fn(edges_a, edges_b, data_range=data_range)
+            return corr, float(sim)
+
+        # ------------------------------------------------------------------ #
+        # Helper: Displacement field statistics                                #
+        # ------------------------------------------------------------------ #
+        def _displacement_stats(dx, dy, pixel_size_um):
+            mag_px = np.sqrt(dx**2 + dy**2)
+            mag_um = mag_px * pixel_size_um
+
+            # Jacobian determinant  det = (1 + dDx/dx)(1 + dDy/dy) - (dDx/dy)(dDy/dx)
+            # Use finite differences
+            ddx_dx = np.gradient(dx, axis=1)
+            ddx_dy = np.gradient(dx, axis=0)
+            ddy_dx = np.gradient(dy, axis=1)
+            ddy_dy = np.gradient(dy, axis=0)
+            jac_det = (1 + ddx_dx) * (1 + ddy_dy) - ddx_dy * ddy_dx
+            pct_fold = float(np.mean(jac_det < 0) * 100)
+
+            return {
+                "mean_um":    float(np.mean(mag_um)),
+                "std_um":     float(np.std(mag_um)),
+                "max_um":     float(np.max(mag_um)),
+                "pct_folding": pct_fold,
+            }
+
+        # ------------------------------------------------------------------ #
+        # Compute overlap mask (tissue present in both images)                 #
+        # ------------------------------------------------------------------ #
+        he_mask = self.extract_tissue_mask(self.he_gray)
+
+        metrics = {}
+
+        # ---- PRE-REGISTRATION -------------------------------------------- #
+        maldi_resized = cv2.resize(
+            self.maldi_gray,
+            (self.he_shape[1], self.he_shape[0])
+        )
+        pre_mask = he_mask & self.extract_tissue_mask(maldi_resized)
+        pre_nmi = _nmi(self.he_gray, maldi_resized, mask=pre_mask)
+        pre_ec, pre_ssim = _edge_metrics(self.he_gray, maldi_resized, mask=pre_mask)
+        metrics["pre"] = {"nmi": pre_nmi, "edge_correlation": pre_ec, "ssim": pre_ssim}
+
+        # ---- POST-AFFINE -------------------------------------------------- #
+        if self.registered_affine is not None:
+            aff_mask = he_mask & self.extract_tissue_mask(self.registered_affine)
+            aff_nmi = _nmi(self.he_gray, self.registered_affine, mask=aff_mask)
+            aff_ec, aff_ssim = _edge_metrics(self.he_gray, self.registered_affine, mask=aff_mask)
+            metrics["affine"] = {"nmi": aff_nmi, "edge_correlation": aff_ec, "ssim": aff_ssim}
+
+        # ---- POST-NON-RIGID ----------------------------------------------- #
+        if self.registered_nonrigid is not None:
+            nr_mask = he_mask & self.extract_tissue_mask(self.registered_nonrigid)
+            nr_nmi = _nmi(self.he_gray, self.registered_nonrigid, mask=nr_mask)
+            nr_ec, nr_ssim = _edge_metrics(self.he_gray, self.registered_nonrigid, mask=nr_mask)
+            disp_stats = _displacement_stats(
+                self.displacement_field_x,
+                self.displacement_field_y,
+                pixel_size_um
+            )
+            metrics["nonrigid"] = {
+                "nmi": nr_nmi,
+                "edge_correlation": nr_ec,
+                "ssim": nr_ssim,
+                "displacement_stats": disp_stats,
+            }
+
+        # ------------------------------------------------------------------ #
+        # Store and optionally print                                           #
+        # ------------------------------------------------------------------ #
+        self.registration_metrics = metrics
+
+        if verbose:
+            print(f"\n{'='*62}")
+            print(f"  REGISTRATION QUALITY METRICS")
+            print(f"{'='*62}")
+            header = f"  {'Metric':<28} {'Pre':>8} {'Affine':>8} {'Non-rigid':>10}"
+            print(header)
+            print(f"  {'-'*58}")
+
+            def _v(stage, key):
+                return f"{metrics[stage][key]:.4f}" if stage in metrics else "  N/A  "
+
+            print(f"  {'NMI':<28} {_v('pre','nmi'):>8} {_v('affine','nmi'):>8} {_v('nonrigid','nmi'):>10}")
+            print(f"  {'Edge Correlation':<28} {_v('pre','edge_correlation'):>8} {_v('affine','edge_correlation'):>8} {_v('nonrigid','edge_correlation'):>10}")
+            print(f"  {'Edge SSIM':<28} {_v('pre','ssim'):>8} {_v('affine','ssim'):>8} {_v('nonrigid','ssim'):>10}")
+
+            if "nonrigid" in metrics and "displacement_stats" in metrics["nonrigid"]:
+                ds = metrics["nonrigid"]["displacement_stats"]
+                print(f"\n  Non-rigid displacement field ({pixel_size_um} µm/pixel):")
+                print(f"    Mean displacement : {ds['mean_um']:.2f} µm")
+                print(f"    Std  displacement : {ds['std_um']:.2f} µm")
+                print(f"    Max  displacement : {ds['max_um']:.2f} µm")
+                print(f"    Folding (det<0)   : {ds['pct_folding']:.3f} %  "
+                      f"{'✓ OK' if ds['pct_folding'] < 0.1 else '⚠ CHECK'}")
+
+            print(f"{'='*62}\n")
+
+        return metrics
+
     def visualize_results(self):
         """Visualize registration results."""
         print(f"\nGenerating visualization...")
@@ -791,8 +1152,9 @@ class MALDIRegistration:
             print(f"No registered image available yet. Run the full pipeline first.")
 
 
-def run_registration_pipeline(he_path, maldi_path, n_landmarks=5, 
-                              save_coords=True, grid_spacing=1, tissue_only=True):
+def run_registration_pipeline(he_path, maldi_path, n_landmarks=5,
+                              save_coords=True, grid_spacing=1, tissue_only=True,
+                              pixel_size_um=2.0):
     """
     Complete registration pipeline with coordinate mapping output.
     
@@ -824,27 +1186,31 @@ def run_registration_pipeline(he_path, maldi_path, n_landmarks=5,
     print(f"{'='*60}\n")
     
     # Initialize
-    print(f"Step 1/6: Loading and preprocessing images...")
+    print(f"Step 1/7: Loading and preprocessing images...")
     reg = MALDIRegistration(he_path, maldi_path)
     
     # Landmark selection
-    print(f"\nStep 2/6: Manual landmark selection...")
+    print(f"\nStep 2/7: Manual landmark selection...")
     reg.select_landmarks(n_points=n_landmarks)
     
     # Affine
-    print(f"\nStep 3/6: Computing affine transformation...")
+    print(f"\nStep 3/7: Computing affine transformation...")
     reg.compute_affine_transform()
     
     # Refine
-    print(f"\nStep 4/6: Refining affine transformation...")
+    print(f"\nStep 4/7: Refining affine transformation...")
     reg.refine_affine()
     
     # Non-rigid
-    print(f"\nStep 5/6: Applying non-rigid deformation...")
+    print(f"\nStep 5/7: Applying non-rigid deformation...")
     reg.apply_nonrigid_deformation()
     
+    # Metrics
+    print(f"\nStep 6/7: Computing registration quality metrics...")
+    reg.compute_registration_metrics(pixel_size_um=pixel_size_um)
+
     # Visualize
-    print(f"\nStep 6/6: Generating visualizations...")
+    print(f"\nStep 7/7: Generating visualizations...")
     reg.visualize_results()
     
     # Save results
@@ -853,12 +1219,15 @@ def run_registration_pipeline(he_path, maldi_path, n_landmarks=5,
     # NEW: Save coordinate mapping
     if save_coords:
         reg.save_coordinate_mapping(grid_spacing=grid_spacing, tissue_only=tissue_only)
-        reg.visualize_coordinate_mapping()
+        reg.visualize_coordinate_mapping(pixel_size_um=pixel_size_um)
+        reg.visualize_mi_heatmap(patch_size=64, n_bins=32,
+                             pixel_size_um=2.0, output_path='mi_heatmap.html')
     
     print(f"\n{'='*60}")
     print(f"REGISTRATION COMPLETE!")
     print(f"{'='*60}")
-    print(f"\nAvailable coordinate transformation methods:")
+    print(f"\nAvailable methods:")
+    print(f"  - reg.compute_registration_metrics(pixel_size_um)")
     print(f"  - reg.transform_maldi_to_he_coordinates(maldi_coords)")
     print(f"  - reg.transform_he_to_maldi_coordinates(he_coords)")
     print(f"  - reg.create_coordinate_mapping_grid(grid_spacing, tissue_only)")

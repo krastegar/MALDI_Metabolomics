@@ -591,16 +591,6 @@ if __name__ == "__main__":
 #                                  he_path='MSI_data_grant/cellranger/329537/outs/binned_outputs/square_002um/spatial/tissue_hires_image.png', 
 #                                  n_points=2, opacity=0.6, point_size=1.5)
     
-        # --- Visium HD ---
-    X, coords, features = load_visium("MSI_data_grant/cellranger/329537/outs/binned_outputs/square_002um/")
-    M0, visium_grid_coords, coord_info = build_base_mask(coords, is_float=True)
-    levels              = build_pyramid_masks(M0, target_max=5_000, plot=True)
-    vis_levels              = aggregate_pyramid(X, visium_grid_coords, levels, data_type='visium')
-    subset_levels =  {k: v for k, v in sorted(vis_levels.items()) if k >= 1}  # skip finest level to save memory
-    levels              = run_multiscale_spaco(subset_levels, keigs=20, b=32, niter=10)
-    ##levels              = run_multiscale_spaco(levels, keigs=20, b=32, niter=10)
-    #plot_spaco(levels, component=0, invert_y=True)
-    
     
     # --- MALDI ---
     maldi_X, maldi_coords, features = load_maldi("MSI_data_grant/Mass_Spec_data/20251012_old_liver.imzML")
@@ -610,3 +600,13 @@ if __name__ == "__main__":
     #subset_levels =  {k: v for k, v in sorted(levels.items()) if k >= 1}
     levels              = run_multiscale_spaco(levels, keigs=20, b=32, niter=10)
     plot_spaco(levels, components=0, invert_y=True)
+
+        # --- Visium HD ---
+    X, coords, features = load_visium("MSI_data_grant/cellranger/329537/outs/binned_outputs/square_002um/")
+    M0, visium_grid_coords, coord_info = build_base_mask(coords, is_float=True)
+    levels              = build_pyramid_masks(M0, target_max=5_000, plot=True)
+    vis_levels              = aggregate_pyramid(X, visium_grid_coords, levels, data_type='visium')
+    subset_levels =  {k: v for k, v in sorted(vis_levels.items()) if k >= 1}  # skip finest level to save memory
+    levels              = run_multiscale_spaco(subset_levels, keigs=20, b=32, niter=10)
+    ##levels              = run_multiscale_spaco(levels, keigs=20, b=32, niter=10)
+    #plot_spaco(levels, component=0, invert_y=True)
