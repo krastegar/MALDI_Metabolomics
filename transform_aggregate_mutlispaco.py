@@ -161,7 +161,7 @@ def build_pyramid_masks(M0: sp.csr_matrix, target_max: int,
 
     if plot:
         import matplotlib.pyplot as plt
-        n_cols = min(4, len(levels))
+        n_cols = min(5, len(levels))
         n_rows = int(np.ceil(len(levels) / n_cols))
         fig, axes = plt.subplots(n_rows, n_cols,
                                  figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
@@ -492,23 +492,19 @@ def plot_spaco(levels: dict[int, dict],
  
     fig.suptitle("Multiscale SpaCo Components", fontsize=12)
     plt.show()
-
-# =============================================================================
-# 7. COORDINATE MAPPING — project coarse scores back to fine grid
-# =============================================================================
  
 def visium_grid_to_he_coords(tissue_idx: np.ndarray, grid_shape: tuple,
-                             coord_info: dict, lvl: int = 0) -> tuple[np.ndarray, np.ndarray]:
+                      coord_info: dict, lvl: int = 0) -> tuple[np.ndarray, np.ndarray]:
     """
     Convert pyramid tissue indices to H&E pixel coordinates.
-
+ 
     Parameters
     ----------
     tissue_idx : np.ndarray  flat grid indices of tissue spots
     grid_shape : (H, W)      grid dimensions at this level
     coord_info : dict        output of build_base_mask — offset and resolution
     lvl        : int         pyramid level (used to scale back to full resolution)
-
+ 
     Returns
     -------
     he_row, he_col : np.ndarray  exact pixel coordinates in H&E image space
@@ -517,20 +513,27 @@ def visium_grid_to_he_coords(tissue_idx: np.ndarray, grid_shape: tuple,
     scale      = 2 ** lvl
     offset     = coord_info['offset']
     resolution = coord_info['resolution']
-
-    # % W = row direction (pxl_row), // W = col direction (pxl_col)
-    he_row = (tissue_idx  % W).astype(np.float32) * scale * resolution + offset[1]
-    he_col = (tissue_idx // W).astype(np.float32) * scale * resolution + offset[0]
-
+ 
+    # tissue_idx = row * W + col  (row = pxl_row direction, col = pxl_col direction)
+    grid_row = (tissue_idx // W).astype(np.float32)   # pxl_row direction
+    grid_col = (tissue_idx  % W).astype(np.float32)   # pxl_col direction
+ 
+    # Invert discretization: grid_idx * scale * resolution + offset = raw pixel coord
+    he_row = grid_row * scale * resolution + offset[1]  # offset[1] = row_min
+    he_col = grid_col * scale * resolution + offset[0]  # offset[0] = col_min
+ 
+    # Reflect col off y-axis to correct for mirror flip in H&E coordinate system
+    he_col = he_col.max() - he_col
+ 
     return he_row, he_col
-
 # =============================================================================
 # Napari overlay function — Optional 
 # =============================================================================
 def spaco_scores_to_napari_points(level_data: dict, coord_info: dict,
                                   he_path: str, n_components: int = 9,
-                                  n_points: int = None, opacity: float = 0.5,
-                                  point_size: int = 1) -> None:
+                                  n_points: int = None, 
+                                  opacity: int = 0.5,
+                                  point_size: int = 0.2) -> None:
     """
     Overlay SpaCo scores on H&E image in Napari.
 
@@ -582,25 +585,28 @@ def spaco_scores_to_napari_points(level_data: dict, coord_info: dict,
 # =============================================================================
 
 if __name__ == "__main__":
-
-    # --- MALDI ---
-    #X, coords, features = load_maldi("MSI_data_grant/Mass_Spec_data/20251012_old_liver.imzML")
-    #M0, grid_coords     = build_base_mask(coords, is_float=False)
-    #levels              = build_pyramid_masks(M0, target_max=10_000, plot=True)
-    #levels              = aggregate_pyramid(X, grid_coords, levels)
-    #levels              = run_multiscale_spaco(levels, keigs=20, b=32, niter=10)
-    #plot_spaco(levels, component=0, invert_y=True)
-
-    # --- Visium HD ---
-    X, coords, features = load_visium("MSI_data_grant/cellranger/329537/outs/binned_outputs/square_002um/")
-    M0, grid_coords, coord_info = build_base_mask(coords, is_float=True)
-    levels              = build_pyramid_masks(M0, target_max=10_000, plot=True)
-    levels              = aggregate_pyramid(X, grid_coords, levels, data_type='visium')
-    subset_levels =  {k: v for k, v in sorted(levels.items()) if k >= 1}  # skip finest level to save memory
-    levels              = run_multiscale_spaco(subset_levels, keigs=20, b=32, niter=10)
-    #levels              = run_multiscale_spaco(levels, keigs=20, b=32, niter=10)
-    plot_spaco(levels, component=0, invert_y=True)
-
     # call to napari overlay function — adjust n_points for faster rendering if needed
-    full_pyramid = np.load("full_data_pyramid.npy", allow_pickle=True).item()
-    spaco_scores_to_napari_points(level_data = full_pyramid[0], coord_info=coord_info, he_path='MSI_data_grant/cellranger/329537/outs/binned_outputs/square_002um/spatial/tissue_hires_image.png', n_points=2, opacity=0.6, point_size=1.5)
+    #full_pyramid = np.load("full_data_pyramid.npy", allow_pickle=True).item()
+    #spaco_scores_to_napari_points(level_data = full_pyramid[0], coord_info=coord_info, 
+#                                  he_path='MSI_data_grant/cellranger/329537/outs/binned_outputs/square_002um/spatial/tissue_hires_image.png', 
+#                                  n_points=2, opacity=0.6, point_size=1.5)
+    
+        # --- Visium HD ---
+    X, coords, features = load_visium("MSI_data_grant/cellranger/329537/outs/binned_outputs/square_002um/")
+    M0, visium_grid_coords, coord_info = build_base_mask(coords, is_float=True)
+    levels              = build_pyramid_masks(M0, target_max=5_000, plot=True)
+    vis_levels              = aggregate_pyramid(X, visium_grid_coords, levels, data_type='visium')
+    subset_levels =  {k: v for k, v in sorted(vis_levels.items()) if k >= 1}  # skip finest level to save memory
+    levels              = run_multiscale_spaco(subset_levels, keigs=20, b=32, niter=10)
+    ##levels              = run_multiscale_spaco(levels, keigs=20, b=32, niter=10)
+    #plot_spaco(levels, component=0, invert_y=True)
+    
+    
+    # --- MALDI ---
+    maldi_X, maldi_coords, features = load_maldi("MSI_data_grant/Mass_Spec_data/20251012_old_liver.imzML")
+    M0_maldi, grid_coords, coords_info = build_base_mask(maldi_coords, is_float=False)
+    levels              = build_pyramid_masks(M0_maldi, target_max=1_000, plot=True)
+    levels              = aggregate_pyramid(maldi_X, grid_coords, levels, data_type='maldi')
+    #subset_levels =  {k: v for k, v in sorted(levels.items()) if k >= 1}
+    levels              = run_multiscale_spaco(levels, keigs=20, b=32, niter=10)
+    plot_spaco(levels, components=0, invert_y=True)

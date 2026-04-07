@@ -560,10 +560,10 @@ if __name__ == "__main__":
         )
     
     # Run the pipeline for cell segmentation and overlay creation.    
-    #he_image_path = "./high_res_MSI/MSI data to share/20250923_young_liver_9AA_I90S25/Histo_2025-10-01_11.40.25_9211.ome.tif"
+    he_image_path = "./high_res_MSI/MSI data to share/20250923_young_liver_9AA_I90S25/Histo_2025-10-01_11.40.25_9211.ome.tif"
     
     # generating the nuclei masks to segment the pixels of interest 
-    #multimodal_registration.segmentation_pipeline(he_image_path, save_overlay=False)
+    multimodal_registration.segmentation_pipeline(he_image_path, save_overlay=False)
 
     # run the pipeline for data level creation and aggregation
     # create the data levels for the pyramid

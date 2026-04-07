@@ -556,12 +556,15 @@ class MALDIRegistration:
         
         # Calculate displacement vectors (from affine-transformed position to final position)
         # First get affine-only transformation
-        maldi_grid_homogeneous = np.column_stack([self.maldi_grid, np.ones(len(self.maldi_grid))])
+        # Use tissue_coords (same source as he_grid) to ensure matching shapes
+        maldi_grid_homogeneous = np.column_stack([tissue_coords, np.ones(len(tissue_coords))])
         affine_only = (self.refined_affine @ maldi_grid_homogeneous.T).T[:, :2]
         
         # Displacement is the NON-RIGID component only
+        PIXEL_SIZE_UM = 2.0  # each pixel = 2 µm (2x2 µm pixel size)
         displacement = he_grid - affine_only
-        displacement_mag = np.sqrt(displacement[:, 0]**2 + displacement[:, 1]**2)
+        displacement_mag_px = np.sqrt(displacement[:, 0]**2 + displacement[:, 1]**2)
+        displacement_mag = displacement_mag_px * PIXEL_SIZE_UM  # convert to µm
         max_displacement = np.max(displacement_mag)
         
         # Subsample points for clearer visualization (show only half the points)
@@ -570,7 +573,7 @@ class MALDIRegistration:
         fig = make_subplots(
             rows=1, cols=2,
             subplot_titles=('MALDI Grid Deformed to H&E Space<br>(Shows where MALDI spots map to)',
-                        f'Non-Rigid Displacement Vectors<br>(Max: {max_displacement:.1f} pixels)'),
+                        f'Non-Rigid Displacement Vectors<br>(Max: {max_displacement:.1f} µm)'),
             horizontal_spacing=0.1
         )
         
@@ -615,8 +618,8 @@ class MALDIRegistration:
             row=1, col=2
         )
         
-        # Only show vectors where there's significant non-rigid deformation
-        mask = displacement_mag > 1.0
+        # Only show vectors where there's significant non-rigid deformation (threshold in µm)
+        mask = displacement_mag > 2.0  # 2 µm = 1 pixel minimum
         
         if np.any(mask):
             # Subsample displacement vectors for performance
@@ -651,7 +654,7 @@ class MALDIRegistration:
                         mode='lines',
                         line=dict(color=colors[idx], width=2),
                         showlegend=False,
-                        hovertemplate=f'Displacement: {displacement_mag[i]:.2f} px<extra></extra>'
+                        hovertemplate=f'Displacement: {displacement_mag[i]:.2f} µm<extra></extra>'
                     ),
                     row=1, col=2
                 )
@@ -668,7 +671,7 @@ class MALDIRegistration:
                         size=6,
                         symbol='arrow',
                         colorbar=dict(
-                            title='Displacement (px)',
+                            title='Displacement (µm)',
                             x=1.15,
                             len=0.5,
                             y=0.5
@@ -676,14 +679,14 @@ class MALDIRegistration:
                         showscale=True
                     ),
                     name='Displacement',
-                    hovertemplate='Displacement: %{marker.color:.2f} px<extra></extra>'
+                    hovertemplate='Displacement: %{marker.color:.2f} µm<extra></extra>'
                 ),
                 row=1, col=2
             )
         else:
             # Add text if no significant displacement
             fig.add_annotation(
-                text='No significant non-rigid displacement<br>(all < 1.0 pixels)',
+                text='No significant non-rigid displacement<br>(all < 2.0 µm)',
                 xref='x4', yref='y4',
                 x=0.5, y=0.5,
                 xanchor='center', yanchor='middle',
@@ -712,7 +715,7 @@ class MALDIRegistration:
         fig.write_html('coordinate_mapping_accuracy.html')
         print(f"Saved interactive coordinate mapping visualization to 'coordinate_mapping_accuracy.html'")
         print(f"\nRegistration Accuracy:")
-        print(f"  Max non-rigid displacement: {max_displacement:.1f} pixels")
+        print(f"  Max non-rigid displacement: {max_displacement:.1f} µm")
         print(f"  Showing {len(subsample_indices)} of {len(he_grid_x)} total MALDI points")
         if np.any(mask):
             print(f"  Showing {np.sum(vector_mask)} displacement vectors")
@@ -878,4 +881,3 @@ if __name__ == "__main__":
         grid_spacing=1,      # Map every pixel
         tissue_only=True     # Only map tissue regions, not background!
     )
-    
