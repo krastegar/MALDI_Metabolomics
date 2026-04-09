@@ -585,9 +585,9 @@ def spaco_scores_to_napari_points(level_data: dict, coord_info: dict,
 # =============================================================================
 
 if __name__ == "__main__":
-    # call to napari overlay function — adjust n_points for faster rendering if needed
-    #full_pyramid = np.load("full_data_pyramid.npy", allow_pickle=True).item()
-    #spaco_scores_to_napari_points(level_data = full_pyramid[0], coord_info=coord_info, 
+# call to napari overlay function — adjust n_points for faster rendering if needed
+#full_pyramid = np.load("full_data_pyramid.npy", allow_pickle=True).item()
+#spaco_scores_to_napari_points(level_data = full_pyramid[0], coord_info=coord_info, 
 #                                  he_path='MSI_data_grant/cellranger/329537/outs/binned_outputs/square_002um/spatial/tissue_hires_image.png', 
 #                                  n_points=2, opacity=0.6, point_size=1.5)
     

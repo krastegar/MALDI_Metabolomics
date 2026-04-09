@@ -764,7 +764,7 @@ class MALDIRegistration:
 
         print("\nComputing local NMI heatmap...")
 
-        he    = self.he_gray
+        he    = self.he_image
         maldi = self.registered_nonrigid
         eps   = 1e-10
 

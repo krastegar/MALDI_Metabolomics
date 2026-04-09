@@ -227,3 +227,6 @@ img_folder/
 .vscode/
 *.lock
 *.npy
+
+# data folder: 
+spaceranger/
