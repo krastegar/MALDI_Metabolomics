@@ -12,7 +12,7 @@ import tifffile
 import scipy.sparse as sp
 import scanpy as sc
 from scipy import ndimage
-from skimage.measure import label as sk_label
+from pyimzml.ImzMLParser import ImzMLParser
 
 class MultiModalRegistration(SpectrumData):
     def __init__(self, *args, use_gpu=True, visium=False, maldi=False, **kwargs):
@@ -49,58 +49,46 @@ class MultiModalRegistration(SpectrumData):
             tf.config.set_visible_devices([], 'GPU')
             print("GPU disabled. Running on CPU.")
 
-    def load_sparse_data(self) -> None:
+    def load_maldi(self, data_path: str) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
         """
-        Loads Visium spatial transcriptomics data from the specified path.
+        Load MALDI-MSI data from an imzML file.
+        Returns count matrix (n_spots, n_mz), integer coords (n_spots, 2), m/z values.
         """
+        parser     = ImzMLParser(Path(data_path))
+        spectra    = [parser.getspectrum(i) for i in range(len(parser.coordinates))]
+        mzs        = [s[0] for s in spectra]
+        intensities= [s[1] for s in spectra]
 
-        if self.maldi: 
-            # Load the imzML file using pyimzML
-            spectra = [self.parser.getspectrum(idx) for idx in range(len(self.parser.coordinates))]
-            
-            # grab the m/z and intensity values for each spectrum
-            mzs = [s[0] for s in spectra]
-            intensities = [s[1] for s in spectra]
+        # Build COO triplets: row = spot index, col = unique m/z bin
+        all_mzs        = np.concatenate(mzs)
+        unique_mzs, col_idx = np.unique(all_mzs, return_inverse=True)
+        row_idx        = np.repeat(np.arange(len(mzs)), [len(m) for m in mzs])
+        coords         = np.array(parser.coordinates)[:, :2]  # integer (x, y)
 
-            # Get coordinates
-            coords = np.array(self.parser.coordinates)
-            self.coords = coords[:, :2]  # Keep only x and y
-            
-            # Concatenate all m/z and intensity arrays to build the COO matrix
-            all_mzs = np.concatenate(mzs) # makes all m/z values in one array, same / intsensity
-            all_intensities = np.concatenate(intensities)
+        X = sp.coo_matrix((np.concatenate(intensities), (row_idx, col_idx)),
+                        shape=(len(mzs), len(unique_mzs))).tocsr()
+        print(f"Loaded MALDI | spots: {X.shape[0]:,} | m/z bins: {X.shape[1]:,}")
+        return X, coords, unique_mzs
 
-            # Build row indices: repeat each sample index by its spectrum length
-            row_indices = np.repeat(np.arange(len(mzs)), [len(m) for m in mzs])
 
-            # Get unique m/z values and mapping
-            unique_mzs, col_indices = np.unique(all_mzs, return_inverse=True)
-            
-            # Build COO matrix
-            coo = sp.coo_matrix((all_intensities, (row_indices, col_indices)),
-                                shape=(len(mzs), len(unique_mzs)))
-            
-            sparse_SF = coo.tocsr()  # Convert to CSR format for efficient row slicing
-            return sparse_SF
-        
-        elif self.visium:
-            
-            # read the 10x Genomics Visium data using Scanpy
-            adata = sc.read_10x_h5(self.data_path)
-
-            # make this a sparse matrix
-            sparse_SF = sp.csr_matrix(adata.X)
-
-            return sparse_SF
-        
-        else: 
-            raise ValueError("Please specify either MALDI or Visium data to load.")
-
-        
-    def load_visium_data(self, full_data=True, sample_features=True):
+    def load_visium(self,data_path: str) -> tuple[sp.csr_matrix, np.ndarray, np.ndarray]:
         """
-        Loads Visium spatial transcriptomics data from the specified path.
+        Load Visium HD data from a CellRanger output directory.
+        Returns count matrix (n_spots, n_genes), float pixel coords, gene names.
         """
+        path  = Path(data_path)
+        adata = sc.read_10x_h5(path / "filtered_feature_bc_matrix.h5")
+        adata.var_names_make_unique()
+
+        # Align spatial coordinates to count matrix barcodes
+        pos = (pd.read_parquet(path / "spatial" / "tissue_positions.parquet")
+                .set_index("barcode").loc[adata.obs_names])
+        coords = pos[["pxl_col_in_fullres", "pxl_row_in_fullres"]].to_numpy()
+
+        X = sp.csr_matrix(adata.X)
+        print(f"Loaded Visium | spots: {X.shape[0]:,} | genes: {X.shape[1]:,}")
+        return X, coords, adata.var_names.to_numpy()
+
         
     def load_normalize_HE(self, he_path: str):
         """
@@ -231,25 +219,11 @@ if __name__ == "__main__":
     he_image_path = "./high_res_MSI/MSI data to share/20250923_young_liver_9AA_I90S25/Histo_2025-10-01_11.40.25_9211.ome.tif"
     
     # generating the nuclei masks to segment the pixels of interest 
-    multimodal_registration.segmentation_pipeline(he_image_path, save_overlay=False)
+    nuclei_masks = multimodal_registration.segmentation_pipeline(he_image_path, save_overlay=False)
 
     # run the pipeline for data level creation and aggregation
     # create the data levels for the pyramid
-    sample_features = multimodal_registration._sample_feature_genration(agg_func="sum")
-    M0, min_x, min_y = multimodal_registration.data_level_creation(sample_features.index.tolist())
-
-    # create the coarsened masks for the pyramid
-    pyramid_masks = multimodal_registration.coarsen_levels(M0, n_levels=5, plot=True)
-
-    # aggregate the data on the pyramid
-    pyramid_data = multimodal_registration.aggregate_data_on_pyramid(
-        sample_features=sample_features,
-        pyramid_masks=pyramid_masks,
-        min_x = min_x,
-        min_y = min_y)
-    
-    # plot the pyramid QC for the first feature (index 0)
-    multimodal_registration.plot_pyramid_qc(pyramid_data, feature_idx=1, cmap="Spectral")
+    print('breakpoint')
 
 
 
