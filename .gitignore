@@ -229,4 +229,6 @@ img_folder/
 *.npy
 
 # data folder: 
-spaceranger/
+space_ranger*/
+square_002um/
+data/

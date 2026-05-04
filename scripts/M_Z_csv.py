@@ -475,13 +475,12 @@ def compute_sparsity(data, by='mzs', intensity_thresh=None, plot=True, save_path
 
 if __name__ == "__main__":
     # file path to the imzml file
-    imzml_path = Path("./MSI_data_grant/Mass_Spec_data/20251012_young_liver.imzML")
+    imzml_path = Path("/home/kia/MALDI_Metabolomics/MSI_data_grant/Mass_Spec_data/20251012_old_liver.imzML")
 
     # initialize the SpectrumData class
-    spectrum_data = SpectrumData(imzml_path, mz_tol=0.0042, min_count=1000, min_intensity=100)
+    spectrum_data = SpectrumData(imzml_path, mz_tol=0.0042, min_count=2, min_intensity=1)
 
-    # perform DBSCAN-like clustering
-    clustered_df = spectrum_data.dbscan_1d_ish()
+    # perform DBSCAN-like clustering    clustered_df = spectrum_data.dbscan_1d_ish()
     #del clustered_df
 
     # generate sampled feature DataFrame
