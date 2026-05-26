@@ -510,3 +510,5 @@ if __name__ == "__main__":
     
     # inspect the features in a specific cluster
     spaco.feature_inspection_by_cluster(n_neighbors=5)
+
+

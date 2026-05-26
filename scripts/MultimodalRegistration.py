@@ -322,82 +322,86 @@ def crop_he_to_maldi(he_path: str, ccs: pd.DataFrame, padding: int = 10):
     original_to_crop = np.column_stack([ccs['he_x'] - bbox[0], ccs['he_y'] - bbox[1]])
     return cropped, bbox, original_to_crop
 
-def spaco_scores_to_napari_points(scores, ccs: pd.DataFrame, 
-                                  he_path: str, n_components: int,
-                                  n_points: int = None, 
-                                  opacity: int = 1,
-                                  point_size: int = 5,
-                                  show_valid_layer: bool = True) -> None:
+def mz_to_napari_points(
+    signal,
+    ccs: pd.DataFrame,
+    col_x: str,
+    col_y: str,
+    he_path: str,
+    point_size: int = 5,
+    opacity: float = 1,
+    n_points: int = None,
+):
     """
-    Overlay SpaCo scores on H&E image in Napari.
+    Plot already-filtered MSI intensity values onto H&E coordinates.
 
     Parameters
     ----------
-    scores        : array of PC/SpaCo scores, may contain NaN rows for dropped pixels
-    ccs           : output of common coordinate system from coarse alignment
-    he_path       : path to tissue_hires_image.png
-    n_components  : number of SpaCo components to add as layers
-    n_points      : if not None, subsample every n_points-th spot for faster rendering
-    show_valid_layer : if True, add a green layer marking non-NaN spots
+    signal : array-like
+        One intensity value per MALDI spot
+    ccs : DataFrame
+        Must contain the columns specified by col_x and col_y
+    col_x : str
+        Column name in ccs for H&E x coordinates
+    col_y : str
+        Column name in ccs for H&E y coordinates
+    he_path : str
+        Path to H&E image
     """
+
+    import numpy as np
     import napari
     from skimage.io import imread
 
-    pcs = scores
+    signal = np.asarray(signal).astype(float)
 
-    he_row, he_col = ccs['he_x'], ccs['he_y']
-    points = np.column_stack([he_col, he_row])
+    he_x = ccs[col_x].values
+    he_y = ccs[col_y].values
 
-    # Subsample if requested — every n_points-th spot
+    points = np.column_stack([he_y, he_x])
+
     if n_points is not None:
         points = points[::n_points]
-        pcs    = pcs[::n_points]
+        signal = signal[::n_points]
 
-    # Mask of spots that made it through filtering (no NaN in any component)
-    valid_mask = ~np.isnan(pcs).any(axis=1)
-    valid_points = points[valid_mask]
-    valid_pcs    = pcs[valid_mask]
+    valid_mask = (signal > 0) & ~np.isnan(signal)
 
-    print(f"Rendering {len(points):,} points total, {len(valid_points):,} valid")
+    print(
+        f"Rendering {len(points):,} points total, "
+        f"{valid_mask.sum():,} with signal"
+    )
 
     he_img = imread(he_path)
+
     viewer = napari.Viewer()
     viewer.add_image(he_img, name="H&E")
 
-    # Green layer showing which spots survived filtering
-    if show_valid_layer:
-        viewer.add_points(
-            valid_points,
-            face_color='green',
-            size=point_size,
-            opacity=opacity,
-            name="Valid spots",
-            visible=True,
-            blending='translucent',
-        )
-
-    # Score layers use only valid points so features & points line up
-    for i in range(min(pcs.shape[1], n_components)):
-        col = pcs[:, i]
-        layer_mask = ~np.isnan(col) & (col != 0)
-        viewer.add_points(
-            points[layer_mask],
-            features={'score': col[layer_mask]},
-            face_color='score',
-            face_colormap='Spectral',
-            size=point_size,
-            opacity=opacity,
-            name=f"SpaC {i+1}",
-            visible=False,
-            blending='translucent',
-        )
+    viewer.add_points(
+        points[valid_mask],
+        features={"intensity": signal[valid_mask]},
+        face_color="intensity",
+        face_colormap="Spectral",
+        size=point_size,
+        opacity=opacity,
+        blending="translucent",
+        name="MSI signal",
+    )
 
     napari.run()
 
-def filter_mz_sf_df(df: pd.DataFrame, targets: list, ppm: float = 15) -> pd.DataFrame: 
+def filter_mz_sf_df(imzml_path: str, targets: list, ppm: float = 15) -> pd.DataFrame: 
     '''
     Filter a DataFrame of m/z values and intensities based on a list of target m/z values.
     '''
+    parser = ImzMLParser(imzml_path)
+    df =pd.DataFrame(
+                    (   # neat trick to unpack the mzs and intensities directly into the row
+                        # * is a unpacking operator called splat and it unpacks the tuple of mzs and intensities
+                        # from getspectrum into individual elements in the new tuple
+                        (*parser.getspectrum(idx), coord) for idx, coord in enumerate(parser.coordinates)
+                    ),
+                        columns=["mzs", "intensities", "coordinates"]
+            )
     print('starting long_df creation...')
     long_df = df.explode(['mzs', 'intensities']).reset_index(drop=True)
     long_df["mzs"] = long_df["mzs"].astype(float)
@@ -419,7 +423,10 @@ def filter_mz_sf_df(df: pd.DataFrame, targets: list, ppm: float = 15) -> pd.Data
     )
     # bring all pixels back — missing ones become NaN rows
     sf_df = sf_df.reindex(df['coordinates']).fillna(0)
-    return sf_df
+    sf_df.columns = [f"mz_{col:.4f}" for col in sf_df.columns]
+    sum_filter = sf_df.sum(axis=1).to_frame()
+    sum_filter.columns = [sf_df.columns[0]]
+    return sum_filter
 
 
 if __name__ == "__main__":
@@ -446,3 +453,5 @@ if __name__ == "__main__":
     # run the pipeline for data level creation and aggregation
     # create the data levels for the pyramid
     print('breakpoint')
+
+     
