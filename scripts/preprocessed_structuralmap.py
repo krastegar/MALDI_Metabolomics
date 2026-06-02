@@ -17,11 +17,10 @@ WHY THIS APPROACH
 PIPELINE
   1. MALDI → NMF components, per-component denoising, structural fields.
   2. H&E → hematoxylin channel (color-deconvolved), structural fields.
-  3. Tissue-masked MI generates transform candidates on structural fields.
-  4. Vessel-center displacement selects the biologically best candidate.
-  5. Optional B-spline candidate, accepted only if vessel geometry improves.
-  6. Diagnostic visualisations and candidate-score audit trail.
-  7. Coordinate mapping export.
+  3. Build structural tissue masks for objective evaluation.
+  4. Directly optimise vessel displacement + structural difference.
+  5. Diagnostic visualisations and objective-score audit trail.
+  6. Coordinate mapping export.
 
 PRIMARY OUTPUTS (in --output_dir/)
   maldi_to_he_table.csv        coordinate mapping with columns:
@@ -44,7 +43,7 @@ USAGE
       --imzml file.imzML --he he.png \\
       --output_dir results/ \\
       --maldi_um_per_pixel 5.0 \\
-      [--he_um_per_pixel 0.5] [--n_components 8] [--bspline]
+      [--he_um_per_pixel 0.5] [--n_components 8]
 """
 
 import argparse
@@ -57,6 +56,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy import ndimage as ndi
+from scipy import optimize
 
 from skimage import io as skio
 from skimage.color import rgb2gray, rgb2hed
@@ -89,12 +89,25 @@ FRANGI_SIGMAS = (1.0, 2.0, 3.0)
 FRANGI_ALPHA = 0.5
 FRANGI_BETA = 0.5
 FRANGI_GAMMA = None
-VESSEL_THRESHOLD_PERCENTILE = 97.5
-VESSEL_MIN_AREA = 25
+VESSEL_THRESHOLD_PERCENTILE = 94.0
+VESSEL_MIN_AREA = 8
 VESSEL_MAX_AREA = 5000
-VESSEL_MIN_ECCENTRICITY = 0.70
+VESSEL_MIN_ECCENTRICITY = 0.35
+VESSEL_MIN_COUNT_FOR_OBJECTIVE = 8
 TISSUE_MASK_THRESHOLD_PERCENTILE = 55.0
 TISSUE_MASK_MIN_SIZE = 64
+
+MAX_TRANSLATION_PIXELS = 30.0
+MAX_ROTATION_DEGREES = 10.0
+VESSEL_DISTANCE_SCALE_PIXELS = 10.0
+MASK_DISTANCE_SCALE_PIXELS = 10.0
+BIOLOGY_WEIGHT_VESSEL = 1.0
+BIOLOGY_WEIGHT_STRUCTURAL = 1.0
+BIOLOGY_WEIGHT_MASK_CHAMFER = 2.0
+BIOLOGY_WEIGHT_TISSUE_OVERLAP = 1.5
+BIOLOGY_WEIGHT_TRANSFORM_SIZE = 0.35
+BIOLOGY_OPT_MAXITER = 35
+BIOLOGY_OPT_POPSIZE = 8
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -526,8 +539,8 @@ def build_tissue_mask(fields: dict,
     """
     Build a tissue-support mask from structural evidence, not raw intensity.
 
-    This mask is used only to keep background zeros out of MI proposal
-    generation. Biological acceptance still comes from vessel geometry.
+    This mask limits structural-difference and tissue-overlap scoring to the
+    tissue support, so background zeros do not reward bad transforms.
     """
     support = (
         0.45 * normalize01(fields["edge"]) +
@@ -546,181 +559,6 @@ def build_tissue_mask(fields: dict,
     if not np.any(mask):
         return np.ones_like(support, dtype=bool)
     return mask.astype(bool)
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Stage 3 — initial transform: centroid + rotation grid search
-# ──────────────────────────────────────────────────────────────────────────
-
-def initialize_transform(fixed: sitk.Image,
-                         moving: sitk.Image,
-                         n_angles: int = 12,
-                         transform_model: str = "euler",
-                         fixed_mask: sitk.Image = None,
-                         moving_mask: sitk.Image = None) -> sitk.Transform:
-    """
-    Build an initial 2-D transform:
-      (a) centroid alignment via SimpleITK's CenteredTransformInitializer
-          in MOMENTS mode,
-      (b) grid search over n_angles initial rotations, keeping the one
-          with the best masked Mattes MI score.
-
-    Rotation search is essential because MOMENTS handles translation only;
-    a gradient-descent optimizer alone can get stuck in a local minimum
-    if the initial orientation is far off (as is typical for MALDI
-    parallelograms placed on H&E slides at arbitrary angles).
-    """
-    transform_model = transform_model.lower()
-    if transform_model not in ("euler", "similarity", "affine"):
-        raise ValueError("transform_model must be 'euler', 'similarity', or 'affine'")
-
-    tx_class = {
-        "euler": sitk.Euler2DTransform,
-        "similarity": sitk.Similarity2DTransform,
-        "affine": sitk.AffineTransform,
-    }[transform_model]
-
-    print(f"[4/7] Candidate generator: {transform_model} centroid + "
-          f"{n_angles}-angle masked-MI rotation search")
-
-    base = sitk.CenteredTransformInitializer(
-        fixed, moving, tx_class(),
-        sitk.CenteredTransformInitializerFilter.MOMENTS,
-    )
-    base_tx = tx_class(base)
-    center = base_tx.GetCenter()
-    translation = base_tx.GetTranslation()
-
-    evaluator = sitk.ImageRegistrationMethod()
-    evaluator.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
-    evaluator.SetMetricSamplingStrategy(evaluator.RANDOM)
-    evaluator.SetMetricSamplingPercentage(0.10, seed=42)
-    evaluator.SetInterpolator(sitk.sitkLinear)
-    if fixed_mask is not None:
-        evaluator.SetMetricFixedMask(fixed_mask)
-    if moving_mask is not None:
-        evaluator.SetMetricMovingMask(moving_mask)
-
-    best_score = np.inf
-    best_tx = base_tx
-    for theta in np.linspace(-np.pi, np.pi, n_angles, endpoint=False):
-        tx = tx_class()
-        tx.SetCenter(center)
-        if transform_model == "euler":
-            tx.SetAngle(float(theta))
-        elif transform_model == "similarity":
-            tx.SetAngle(float(theta))
-            tx.SetScale(1.0)
-        else:
-            c, s = np.cos(theta), np.sin(theta)
-            tx.SetMatrix([c, -s, s, c])
-        tx.SetTranslation(translation)
-        evaluator.SetInitialTransform(tx, inPlace=False)
-        try:
-            score = evaluator.MetricEvaluate(fixed, moving)
-        except Exception:
-            continue
-        if score < best_score:
-            best_score = score
-            best_tx = tx
-
-    print(f"[4/7] Best initial masked MI = {best_score:.4f}")
-    return best_tx
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Stage 4 — multi-resolution affine MI registration
-# ──────────────────────────────────────────────────────────────────────────
-
-def register_affine(fixed: sitk.Image,
-                    moving: sitk.Image,
-                    initial: sitk.Transform,
-                    fixed_mask: sitk.Image = None,
-                    moving_mask: sitk.Image = None) -> sitk.Transform:
-    """Three-level masked Mattes MI proposal + gradient descent."""
-    print("[4/7] Candidate generator: multi-resolution masked MI registration")
-
-    R = sitk.ImageRegistrationMethod()
-    R.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
-    R.SetMetricSamplingStrategy(R.RANDOM)
-    R.SetMetricSamplingPercentage(0.25, seed=42)
-    R.SetInterpolator(sitk.sitkLinear)
-    if fixed_mask is not None:
-        R.SetMetricFixedMask(fixed_mask)
-    if moving_mask is not None:
-        R.SetMetricMovingMask(moving_mask)
-
-    R.SetOptimizerAsRegularStepGradientDescent(
-        learningRate=1.0,
-        minStep=1e-4,
-        numberOfIterations=300,
-        relaxationFactor=0.5,
-        gradientMagnitudeTolerance=1e-6,
-    )
-    R.SetOptimizerScalesFromPhysicalShift()
-
-    R.SetShrinkFactorsPerLevel([4, 2, 1])
-    R.SetSmoothingSigmasPerLevel([2.0, 1.0, 0.0])
-    R.SmoothingSigmasAreSpecifiedInPhysicalUnitsOn()
-
-    R.SetInitialTransform(initial, inPlace=False)
-
-    def log_iter():
-        line = (f"iter {R.GetOptimizerIteration():3d}  "
-                f"level {R.GetCurrentLevel()}  "
-                f"masked MI = {R.GetMetricValue():.4f}")
-        if R.GetOptimizerIteration() % 25 == 0:
-            print("  " + line)
-    R.AddCommand(sitk.sitkIterationEvent, log_iter)
-
-    final = R.Execute(fixed, moving)
-
-    print(f"[4/7] Done. Final masked MI = {R.GetMetricValue():.4f}")
-    print(f"[4/7] Stop: {R.GetOptimizerStopConditionDescription()}")
-    return final
-
-
-# ──────────────────────────────────────────────────────────────────────────
-# Stage 5 — optional B-spline deformable refinement
-# ──────────────────────────────────────────────────────────────────────────
-
-def refine_bspline(fixed: sitk.Image,
-                   moving: sitk.Image,
-                   affine_tx: sitk.Transform,
-                   mesh_size: int = 8,
-                   fixed_mask: sitk.Image = None,
-                   moving_mask: sitk.Image = None) -> sitk.Transform:
-    """Optional masked-MI B-spline proposal on top of the affine candidate."""
-    print(f"[5/7] Candidate generator: B-spline proposal (mesh {mesh_size}×{mesh_size})")
-
-    # Optimize only the deformable transform. Optimizing a CompositeTransform
-    # directly can fail because SimpleITK/ITK does not implement the position
-    # Jacobian needed by the metric for CompositeTransform.
-    moving_affine = sitk.Resample(moving, fixed, affine_tx,
-                                  sitk.sitkLinear, 0.0)
-    bspline = sitk.BSplineTransformInitializer(fixed, [mesh_size, mesh_size])
-
-    R = sitk.ImageRegistrationMethod()
-    R.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
-    R.SetMetricSamplingStrategy(R.RANDOM)
-    R.SetMetricSamplingPercentage(0.25, seed=42)
-    R.SetInterpolator(sitk.sitkLinear)
-    if fixed_mask is not None:
-        R.SetMetricFixedMask(fixed_mask)
-    if moving_mask is not None:
-        R.SetMetricMovingMask(moving_mask)
-    R.SetOptimizerAsLBFGSB(
-        gradientConvergenceTolerance=1e-5,
-        numberOfIterations=100,
-        maximumNumberOfCorrections=5,
-    )
-    R.SetInitialTransform(bspline, inPlace=False)
-
-    refined_bspline = R.Execute(fixed, moving_affine)
-    print(f"[5/7] Done. Final B-spline masked MI = {R.GetMetricValue():.4f}")
-    print(f"[5/7] Stop: {R.GetOptimizerStopConditionDescription()}")
-
-    return sitk.CompositeTransform([affine_tx, refined_bspline])
 
 
 def compute_correspondence_table(maldi: dict,
@@ -745,6 +583,7 @@ def compute_correspondence_table(maldi: dict,
     affine transforms this is computed analytically and vectorised; for
     composite transforms (B-spline) it falls back to per-point evaluation.
     """
+    
     parser = ImzMLParser(imzml_path)
     coords = list(parser.coordinates)
     n = len(coords)
@@ -847,15 +686,21 @@ def warp_mask_to_fixed(mask: np.ndarray, fixed: sitk.Image,
     warped = sitk.Resample(moving, fixed, tx, sitk.sitkNearestNeighbor, 0)
     return sitk_to_np(warped).astype(bool)
 
-def identity_transform(transform_model: str, fixed_shape: tuple) -> sitk.Transform:
+def euler_transform_from_params(params: np.ndarray,
+                                fixed_shape: tuple) -> sitk.Euler2DTransform:
     """
-    Return the pre-registration candidate.
+    Build a fixed->moving Euler transform from [angle_deg, tx_px, ty_px].
 
-    It is deliberately a SimpleITK identity transform: if MALDI/H&E structural
-    fields already share a plausible grid alignment, this candidate preserves it.
+    Scale is fixed at 1.0 and no shear is allowed. This keeps optimization in
+    the biologically plausible regime requested for local tissue geometry.
     """
-    _ = transform_model, fixed_shape
-    return sitk.Transform(2, sitk.sitkIdentity)
+    angle_deg, tx, ty = [float(v) for v in params]
+    h, w = fixed_shape
+    transform = sitk.Euler2DTransform()
+    transform.SetCenter(((w - 1) / 2.0, (h - 1) / 2.0))
+    transform.SetAngle(np.deg2rad(angle_deg))
+    transform.SetTranslation((tx, ty))
+    return transform
 
 def save_image(arr: np.ndarray, path: Path, cmap: str = "gray",
                title: str = None) -> None:
@@ -953,7 +798,7 @@ def detect_vessels(vesselness: np.ndarray,
         threshold = float(percentile_thr)
 
     mask = vessel >= threshold
-    mask = ndi.binary_fill_holes(mask)
+    #mask = ndi.binary_fill_holes(mask) # Don't fill holes; vessels can have gaps and we want to keep them separate.
     labels_img = label(mask)
     props = regionprops_table(
         labels_img,
@@ -1051,73 +896,233 @@ def vessel_displacement_stats(maldi_vessels: pd.DataFrame,
     return table, stats
 
 
-def score_transform_by_vessels(name: str,
-                               transform: sitk.Transform,
-                               maldi_vessels: pd.DataFrame,
-                               he_vessels: pd.DataFrame,
-                               fixed_shape: tuple) -> tuple[pd.DataFrame, dict]:
+def bidirectional_vessel_chamfer(maldi_vessels: pd.DataFrame,
+                                 he_vessels: pd.DataFrame,
+                                 transform: sitk.Transform,
+                                 fixed_shape: tuple,
+                                 vessel_cache: dict = None) -> dict:
     """
-    Score one candidate transform by local anatomical vessel correspondence.
+    Symmetric vessel-center distance under a transform.
 
-    This is the biological objective. MI values are intentionally not used for
-    selecting the final transform.
+    MALDI centers are mapped moving->fixed via inverse transform and matched to
+    H&E centers. H&E centers are mapped fixed->moving and matched back to MALDI
+    centers. This avoids the one-way nearest-neighbor trap where dense H&E
+    detections can make a poor alignment look acceptable.
     """
-    displacement_df, stats = vessel_displacement_stats(
-        maldi_vessels, he_vessels, transform, fixed_shape)
-    stats = dict(stats)
-    stats["candidate"] = name
-    print(
-        f"[6/7] Candidate '{name}' vessel score: "
-        f"n={stats['n']}, mean={stats['mean']:.3f}, "
-        f"median={stats['median']:.3f}, p95={stats['p95']:.3f}"
-    )
-    return displacement_df, stats
+    if maldi_vessels.empty or he_vessels.empty:
+        return {
+            "vessel_chamfer": np.inf,
+            "maldi_to_he_mean": np.inf,
+            "he_to_maldi_mean": np.inf,
+            "vessel_n_maldi": int(len(maldi_vessels)),
+            "vessel_n_he": int(len(he_vessels)),
+        }
 
-
-def select_best_biological_transform(candidate_scores: list[dict]) -> dict:
-    """
-    Select the transform with the lowest mean vessel displacement.
-
-    Identity/pre-registration participates as an ordinary candidate, so any MI
-    proposal that worsens local geometry is automatically rejected.
-    """
-    if not candidate_scores:
-        raise ValueError("No transform candidates were scored")
-
-    scored = [
-        score for score in candidate_scores
-        if score.get("n", 0) > 0 and np.isfinite(score.get("mean", np.nan))
-    ]
-    if not scored:
-        selected = candidate_scores[0]
-        selected["selection_reason"] = (
-            "No finite vessel displacement scores were available; kept "
-            "identity/pre-registration candidate."
-        )
-        return selected
-
-    selected = min(scored, key=lambda score: score["mean"])
-    identity_score = next(
-        (score for score in candidate_scores if score["candidate"] == "identity"),
-        None,
-    )
-    if identity_score is not None and selected["candidate"] == "identity":
-        selected["selection_reason"] = (
-            "Identity/pre-registration had the lowest mean vessel displacement; "
-            "MI proposals were rejected."
-        )
-    elif identity_score is not None and np.isfinite(identity_score.get("mean", np.nan)):
-        selected["selection_reason"] = (
-            f"Selected '{selected['candidate']}' because its mean vessel "
-            f"displacement ({selected['mean']:.3f}) improved on identity "
-            f"({identity_score['mean']:.3f})."
-        )
+    if vessel_cache is None:
+        maldi_xy = maldi_vessels[["x", "y"]].to_numpy(dtype=np.float64)
+        he_xy = he_vessels[["x", "y"]].to_numpy(dtype=np.float64)
+        he_nn = NearestNeighbors(n_neighbors=1).fit(he_xy)
+        maldi_nn = NearestNeighbors(n_neighbors=1).fit(maldi_xy)
     else:
-        selected["selection_reason"] = (
-            f"Selected '{selected['candidate']}' because it had the lowest "
-            "finite mean vessel displacement."
+        maldi_xy = vessel_cache["maldi_xy"]
+        he_xy = vessel_cache["he_xy"]
+        he_nn = vessel_cache["he_nn"]
+        maldi_nn = vessel_cache["maldi_nn"]
+
+    maldi_registered = transform_moving_points_to_fixed(maldi_xy, transform, fixed_shape)
+    he_to_maldi = np.zeros_like(he_xy)
+    for i, (x, y) in enumerate(he_xy):
+        he_to_maldi[i] = transform.TransformPoint((float(x), float(y)))
+
+    maldi_to_he_dist = he_nn.kneighbors(maldi_registered, return_distance=True)[0].ravel()
+    he_to_maldi_dist = maldi_nn.kneighbors(he_to_maldi, return_distance=True)[0].ravel()
+
+    maldi_to_he_mean = float(np.mean(maldi_to_he_dist))
+    he_to_maldi_mean = float(np.mean(he_to_maldi_dist))
+    return {
+        "vessel_chamfer": 0.5 * (maldi_to_he_mean + he_to_maldi_mean),
+        "maldi_to_he_mean": maldi_to_he_mean,
+        "he_to_maldi_mean": he_to_maldi_mean,
+        "vessel_n_maldi": int(len(maldi_xy)),
+        "vessel_n_he": int(len(he_xy)),
+    }
+
+
+def biological_objective_components(params: np.ndarray,
+                                    fixed_image: np.ndarray,
+                                    moving_image: np.ndarray,
+                                    fixed_mask: np.ndarray,
+                                    moving_mask: np.ndarray,
+                                    maldi_vessels: pd.DataFrame,
+                                    he_vessels: pd.DataFrame,
+                                    fixed_sitk: sitk.Image,
+                                    moving_sitk: sitk.Image,
+                                    vessel_cache: dict = None) -> tuple[float, dict, sitk.Transform]:
+    """
+    Direct structural/biological registration objective.
+
+    Objective terms:
+      vessel_chamfer      bidirectional vessel displacement in pixels
+      structural_diff     mean |warped MALDI - H&E| within tissue overlap
+      lost_overlap        1 - intersection/union of structural tissue masks
+      transform_size      normalized rotation/translation magnitude
+    """
+    transform = euler_transform_from_params(params, fixed_image.shape)
+    warped_moving = warp_to_fixed(moving_sitk, fixed_sitk, transform)
+    warped_mask = warp_mask_to_fixed(moving_mask, fixed_sitk, transform)
+
+    overlap = fixed_mask & warped_mask
+    union = fixed_mask | warped_mask
+    if np.any(overlap):
+        structural_diff = float(np.mean(np.abs(
+            normalize01(warped_moving)[overlap] - normalize01(fixed_image)[overlap]
+        )))
+    else:
+        structural_diff = 1.0
+
+    if np.any(union):
+        tissue_overlap = float(np.sum(overlap) / np.sum(union))
+    else:
+        tissue_overlap = 0.0
+    lost_overlap = 1.0 - tissue_overlap
+
+    vessel_stats = bidirectional_vessel_chamfer(
+        maldi_vessels, he_vessels, transform, fixed_image.shape, vessel_cache)
+    vessel_term = vessel_stats["vessel_chamfer"] / VESSEL_DISTANCE_SCALE_PIXELS
+
+    angle_deg, tx, ty = [float(v) for v in params]
+    transform_size = np.sqrt(
+        (angle_deg / MAX_ROTATION_DEGREES) ** 2 +
+        (tx / MAX_TRANSLATION_PIXELS) ** 2 +
+        (ty / MAX_TRANSLATION_PIXELS) ** 2
+    )
+
+    score = (
+        BIOLOGY_WEIGHT_VESSEL * vessel_term +
+        BIOLOGY_WEIGHT_STRUCTURAL * structural_diff +
+        BIOLOGY_WEIGHT_TISSUE_OVERLAP * lost_overlap +
+        BIOLOGY_WEIGHT_TRANSFORM_SIZE * transform_size
+    )
+    components = {
+        "score": float(score),
+        "angle_deg": angle_deg,
+        "tx": tx,
+        "ty": ty,
+        "vessel_chamfer": float(vessel_stats["vessel_chamfer"]),
+        "maldi_to_he_mean": float(vessel_stats["maldi_to_he_mean"]),
+        "he_to_maldi_mean": float(vessel_stats["he_to_maldi_mean"]),
+        "structural_diff": structural_diff,
+        "tissue_overlap": tissue_overlap,
+        "lost_overlap": lost_overlap,
+        "transform_size": float(transform_size),
+        "vessel_n_maldi": vessel_stats["vessel_n_maldi"],
+        "vessel_n_he": vessel_stats["vessel_n_he"],
+    }
+    return float(score), components, transform
+
+
+def optimize_biological_transform(fixed_image: np.ndarray,
+                                  moving_image: np.ndarray,
+                                  fixed_mask: np.ndarray,
+                                  moving_mask: np.ndarray,
+                                  maldi_vessels: pd.DataFrame,
+                                  he_vessels: pd.DataFrame,
+                                  fixed_sitk: sitk.Image,
+                                  moving_sitk: sitk.Image) -> tuple[sitk.Transform, pd.DataFrame, dict]:
+    """
+    Optimize the direct biological objective over a bounded rigid transform.
+
+    Search space:
+      angle_deg in [-MAX_ROTATION_DEGREES, MAX_ROTATION_DEGREES]
+      tx, ty    in [-MAX_TRANSLATION_PIXELS, MAX_TRANSLATION_PIXELS]
+    """
+    bounds = [
+        (-MAX_ROTATION_DEGREES, MAX_ROTATION_DEGREES),
+        (-MAX_TRANSLATION_PIXELS, MAX_TRANSLATION_PIXELS),
+        (-MAX_TRANSLATION_PIXELS, MAX_TRANSLATION_PIXELS),
+    ]
+    trace = []
+    vessel_cache = None
+    if not maldi_vessels.empty and not he_vessels.empty:
+        maldi_xy = maldi_vessels[["x", "y"]].to_numpy(dtype=np.float64)
+        he_xy = he_vessels[["x", "y"]].to_numpy(dtype=np.float64)
+        vessel_cache = {
+            "maldi_xy": maldi_xy,
+            "he_xy": he_xy,
+            "maldi_nn": NearestNeighbors(n_neighbors=1).fit(maldi_xy),
+            "he_nn": NearestNeighbors(n_neighbors=1).fit(he_xy),
+        }
+
+    def evaluate(params, stage):
+        score, components, _ = biological_objective_components(
+            np.asarray(params, dtype=float),
+            fixed_image,
+            moving_image,
+            fixed_mask,
+            moving_mask,
+            maldi_vessels,
+            he_vessels,
+            fixed_sitk,
+            moving_sitk,
+            vessel_cache,
         )
-    return selected
+        components["stage"] = stage
+        trace.append(components)
+        return score
+
+    identity_params = np.array([0.0, 0.0, 0.0], dtype=float)
+    identity_score = evaluate(identity_params, "identity")
+    print(f"[4/7] Identity biological objective = {identity_score:.4f}")
+
+    print("[4/7] Optimizing direct biological objective: vessel + structure + overlap")
+    result = optimize.differential_evolution(
+        lambda p: evaluate(p, "global"),
+        bounds=bounds,
+        maxiter=BIOLOGY_OPT_MAXITER,
+        popsize=BIOLOGY_OPT_POPSIZE,
+        tol=0.01,
+        polish=False,
+        seed=42,
+        workers=1,
+        updating="immediate",
+    )
+    local = optimize.minimize(
+        lambda p: evaluate(p, "local"),
+        x0=result.x,
+        method="Powell",
+        bounds=bounds,
+        options={"maxiter": 80, "xtol": 1e-3, "ftol": 1e-4},
+    )
+
+    candidates = [
+        ("identity", identity_params, identity_score),
+        ("global", result.x, float(result.fun)),
+        ("local", local.x, float(local.fun)),
+    ]
+    best_name, best_params, _ = min(candidates, key=lambda item: item[2])
+    best_score, best_components, best_transform = biological_objective_components(
+        best_params,
+        fixed_image,
+        moving_image,
+        fixed_mask,
+        moving_mask,
+        maldi_vessels,
+        he_vessels,
+        fixed_sitk,
+        moving_sitk,
+        vessel_cache,
+    )
+    best_components["selected_stage"] = best_name
+    best_components["score"] = best_score
+    print(
+        f"[4/7] Selected biological optimum from {best_name}: "
+        f"score={best_score:.4f}, vessel={best_components['vessel_chamfer']:.3f}px, "
+        f"struct={best_components['structural_diff']:.3f}, "
+        f"overlap={best_components['tissue_overlap']:.3f}, "
+        f"angle={best_components['angle_deg']:.3f}, "
+        f"tx={best_components['tx']:.3f}, ty={best_components['ty']:.3f}"
+    )
+    return best_transform, pd.DataFrame(trace), best_components
 
 
 def save_vessel_overlay(base: np.ndarray,
@@ -1207,7 +1212,7 @@ def main() -> None:
     ap.add_argument("--output_dir",   default="reg_results")
     ap.add_argument("--n_components", type=int, default=8,
                     help="Number of NMF components")
-    ap.add_argument("--mz_bin",       type=float, default=0.1,
+    ap.add_argument("--mz_bin",       type=float, default=0.042,
                     help="m/z tolerance in Da for dense-region binning")
     ap.add_argument("--mz_bin_min_count", type=int, default=100,
                     help="Minimum number of m/z values required to keep a dense bin")
@@ -1217,7 +1222,7 @@ def main() -> None:
                     help="Physical size of one H&E pixel (μm). "
                          "If omitted, inferred assuming same tissue area.")
     ap.add_argument("--bspline",      action="store_true",
-                    help="Add B-spline deformable refinement after affine")
+                    help="Ignored; biological optimization is rigid rotation + translation only")
     ap.add_argument("--no_hematoxylin", action="store_true",
                     help="Use plain grayscale H&E instead of hematoxylin")
     ap.add_argument("--denoise_method", default=DENOISE_METHOD,
@@ -1232,11 +1237,10 @@ def main() -> None:
                     help="How to combine per-component structural fields")
     ap.add_argument("--registration_field", default=REGISTRATION_FIELD,
                     choices=["edge", "anisotropy", "vesselness"],
-                    help="Structural field used for Mutual Information registration")
+                    help="Structural field used in the direct biological objective")
     ap.add_argument("--transform_model", default="euler",
                     choices=["euler", "similarity", "affine"],
-                    help="Registration transform. 'euler' prevents zoom/shear; "
-                         "'affine' keeps the old unconstrained behavior.")
+                    help="Ignored; direct biological optimization uses a constrained Euler transform")
     args = ap.parse_args()
 
     out = Path(args.output_dir)
@@ -1293,84 +1297,64 @@ def main() -> None:
     save_difference(maldi["registration_image"], he["registration_image"],
                      out / "structural_difference_pre.png",
                      title="Pre-registration structural-field difference")
+    # ------------------------------------------------------------------
+    # PRE-REGISTRATION COORDINATE EXPORT
+    # Use identity transform but preserve EXACT registration geometry
+    # ------------------------------------------------------------------
 
-    # 4. Candidate generation. MI proposes transforms, but biological vessel
-    # geometry selects the final transform.
+    print("[4/7] Exporting pre-registration coordinate map")
+
+    identity_tx = sitk.Euler2DTransform()
+    identity_tx.SetCenter((
+        (maldi["grid_shape"][1] - 1) / 2.0,
+        (maldi["grid_shape"][0] - 1) / 2.0
+    ))
+    identity_tx.SetAngle(0.0)
+    identity_tx.SetTranslation((0.0, 0.0))
+
+    corr_table, corr_cols = compute_correspondence_table(
+        maldi,
+        he,
+        identity_tx,
+        args.imzml,
+    )
+
+    save_correspondence_csv(
+        corr_table,
+        corr_cols,
+        out / "pre_registration_coordinate_map.csv"
+    )
+
+    # 4. Direct biological optimization. No MI, no shear, no scale changes:
+    # optimize only rotation + translation for local tissue geometry.
     fixed  = np_to_sitk(he["registration_image"])
     moving = np_to_sitk(maldi["registration_image"])
     he_tissue_mask = build_tissue_mask(he["structural_fields"])
     maldi_tissue_mask = build_tissue_mask(maldi["structural_fields"])
     save_image(maldi_tissue_mask.astype(np.float32), out / "maldi_tissue_mask.png",
-               cmap="gray", title="MALDI structural tissue mask for MI proposals")
+               cmap="gray", title="MALDI structural tissue mask")
     save_image(he_tissue_mask.astype(np.float32), out / "he_tissue_mask.png",
-               cmap="gray", title="H&E structural tissue mask for MI proposals")
-    fixed_mask = mask_to_sitk(he_tissue_mask)
-    moving_mask = mask_to_sitk(maldi_tissue_mask)
-
-    candidates = []
-    identity_tx = identity_transform(args.transform_model, he["registration_image"].shape)
-    candidates.append({"candidate": "identity", "transform": identity_tx})
-
-    initial = initialize_transform(
-        fixed,
-        moving,
-        n_angles=12,
-        transform_model=args.transform_model,
-        fixed_mask=fixed_mask,
-        moving_mask=moving_mask,
-    )
-    candidates.append({"candidate": "initial", "transform": initial})
-
-    affine_tx = register_affine(
-        fixed,
-        moving,
-        initial,
-        fixed_mask=fixed_mask,
-        moving_mask=moving_mask,
-    )
-    candidates.append({"candidate": "masked_mi", "transform": affine_tx})
-
+               cmap="gray", title="H&E structural tissue mask")
     if args.bspline:
-        affine_moving_mask = mask_to_sitk(
-            warp_mask_to_fixed(maldi_tissue_mask, fixed, affine_tx))
-        bspline_tx = refine_bspline(
-            fixed,
-            moving,
-            affine_tx,
-            fixed_mask=fixed_mask,
-            moving_mask=affine_moving_mask,
-        )
-        candidates.append({"candidate": "bspline", "transform": bspline_tx})
+        print("[4/7] --bspline ignored: direct biological objective is constrained to rigid rotation + translation")
 
-    candidate_displacements = {}
-    candidate_scores = []
-    for candidate in candidates:
-        displacement_df, stats = score_transform_by_vessels(
-            candidate["candidate"],
-            candidate["transform"],
-            maldi_vessels["table"],
-            he_vessels["table"],
-            he["registration_image"].shape,
-        )
-        candidate_displacements[candidate["candidate"]] = displacement_df
-        candidate_scores.append(stats)
-
-    selected_score = select_best_biological_transform(candidate_scores)
-    score_df = pd.DataFrame(candidate_scores)
-    score_df.to_csv(out / "registration_candidate_scores.csv", index=False)
-
-    selected_name = selected_score["candidate"]
-    final_tx = next(
-        candidate["transform"] for candidate in candidates
-        if candidate["candidate"] == selected_name
+    final_tx, objective_trace, objective_stats = optimize_biological_transform(
+        fixed_image=he["registration_image"],
+        moving_image=maldi["registration_image"],
+        fixed_mask=he_tissue_mask,
+        moving_mask=maldi_tissue_mask,
+        maldi_vessels=maldi_vessels["table"],
+        he_vessels=he_vessels["table"],
+        fixed_sitk=fixed,
+        moving_sitk=moving,
     )
+    objective_trace.to_csv(out / "biological_objective_trace.csv", index=False)
+    pd.DataFrame([objective_stats]).to_csv(out / "biological_objective_summary.csv", index=False)
     with open(out / "selected_transform.txt", "w", encoding="utf-8") as f:
-        f.write(f"selected_candidate: {selected_name}\n")
-        f.write(f"reason: {selected_score['selection_reason']}\n")
-        for key in ("n", "mean", "std", "median", "p95"):
-            f.write(f"{key}: {selected_score.get(key)}\n")
-    print(f"[6/7] Selected transform candidate: {selected_name}")
-    print(f"[6/7] {selected_score['selection_reason']}")
+        f.write("selected_candidate: direct_biological_objective\n")
+        f.write("reason: optimized vessel Chamfer + structural difference + tissue overlap directly\n")
+        for key, value in objective_stats.items():
+            f.write(f"{key}: {value}\n")
 
     # 6. Diagnostic visualizations
     warped_structural = warp_to_fixed(moving, fixed, final_tx)
@@ -1380,11 +1364,24 @@ def main() -> None:
                      out / "structural_difference_post.png",
                      title="Post-registration structural-field difference")
 
-    displacement_df = candidate_displacements[selected_name]
-    displacement_stats = {
-        key: selected_score[key]
-        for key in ("mean", "std", "median", "p95", "n")
-    }
+    displacement_df, displacement_stats = vessel_displacement_stats(
+        maldi_vessels["table"],
+        he_vessels["table"],
+        final_tx,
+        he["registration_image"].shape,
+    )
+    displacement_stats.update({
+        "bidirectional_vessel_chamfer": objective_stats["vessel_chamfer"],
+        "maldi_to_he_mean": objective_stats["maldi_to_he_mean"],
+        "he_to_maldi_mean": objective_stats["he_to_maldi_mean"],
+        "structural_diff": objective_stats["structural_diff"],
+        "tissue_overlap": objective_stats["tissue_overlap"],
+        "lost_overlap": objective_stats["lost_overlap"],
+        "objective_score": objective_stats["score"],
+        "angle_deg": objective_stats["angle_deg"],
+        "tx": objective_stats["tx"],
+        "ty": objective_stats["ty"],
+    })
     displacement_df.to_csv(out / "vessel_displacements.csv", index=False)
     post_points = displacement_df[["maldi_registered_x", "maldi_registered_y"]].to_numpy(
         dtype=np.float64) if not displacement_df.empty else np.zeros((0, 2))
@@ -1426,7 +1423,7 @@ def main() -> None:
     print("Next steps:")
     print("  1. Inspect nmf_component_denoising.png for component-level smoothing effects")
     print("  2. Inspect maldi_structural_fields.png and he_structural_fields.png")
-    print("  3. Inspect registration_candidate_scores.csv and selected_transform.txt")
+    print("  3. Inspect biological_objective_summary.csv and biological_objective_trace.csv")
     print("  4. Use vessel_displacement_stats.csv as local anatomical validation")
     print("  5. Use maldi_to_he_table.csv for MALDI-to-H&E coordinate mapping")
     print()
