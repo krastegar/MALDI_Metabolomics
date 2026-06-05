@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import sparse as sp
 from pyimzml.ImzMLParser import ImzMLParser, getionimage
-from SpaCoObject import SPACO
+from scripts.SpaCoObject import SPACO
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler, normalize
 import plotly.express as px

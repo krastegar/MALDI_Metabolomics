@@ -683,7 +683,7 @@ def warp_to_fixed(moving: sitk.Image, fixed: sitk.Image,
 def warp_mask_to_fixed(mask: np.ndarray, fixed: sitk.Image,
                        tx: sitk.Transform) -> np.ndarray:
     moving = sitk.GetImageFromArray(mask.astype(np.uint8))
-    warped = sitk.Resample(moving, fixed, tx, sitk.sitkNearestNeighbor, 0)
+    warped = sitk.Resample(moving, fixed, tx, sitk.sitkNearestNeighbor, 0) # samples from the moving image and maps it to the fixed image space using the provided transform. The sitk.sitkNearestNeighbor interpolation method is used to ensure that the output values are either 0 or 1, preserving the binary nature of the mask.
     return sitk_to_np(warped).astype(bool)
 
 def euler_transform_from_params(params: np.ndarray,

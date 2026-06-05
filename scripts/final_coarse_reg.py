@@ -789,7 +789,7 @@ def run_registration_pipeline(he_path, maldi_path, n_landmarks=8,
         reg.save_coordinate_mapping(
             output_path=str(out / 'coordinate_mapping.csv'),
             grid_spacing=grid_spacing, tissue_only=tissue_only)
-        reg.visualize_coordinate_mapping()
+        #reg.visualize_coordinate_mapping()
 
     print(f"\n{SEP}\nREGISTRATION COMPLETE\n{SEP}")
     print(f"  Outputs: {out.resolve()}\n{SEP}\n")
@@ -823,7 +823,7 @@ if __name__ == "__main__":
     registration = run_registration_pipeline(
         he_path=HE_PATH,
         maldi_path=MALDI_PATH,
-        n_landmarks=10,
+        n_landmarks=8,
         save_coords=True,
         grid_spacing=1,
         tissue_only=True,

@@ -1,5 +1,5 @@
-from SpaCoObject import SPACO
-from M_Z_csv import SpectrumData
+from scripts.SpaCoObject import SPACO
+from scripts.M_Z_csv import SpectrumData
 from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -389,45 +389,45 @@ def mz_to_napari_points(
 
     napari.run()
 
-def filter_mz_sf_df(imzml_path: str, targets: list, ppm: float = 15) -> pd.DataFrame: 
-    '''
-    Filter a DataFrame of m/z values and intensities based on a list of target m/z values.
-    '''
+def filter_mz_sf_df(imzml_path: str, targets: list, ppm: float = 15):
+    """
+    RAM‑efficient m/z filtering:
+    - No explode()
+    - No long DataFrame
+    - Stream spectra one by one
+    """
     parser = ImzMLParser(imzml_path)
-    df =pd.DataFrame(
-                    (   # neat trick to unpack the mzs and intensities directly into the row
-                        # * is a unpacking operator called splat and it unpacks the tuple of mzs and intensities
-                        # from getspectrum into individual elements in the new tuple
-                        (*parser.getspectrum(idx), coord) for idx, coord in enumerate(parser.coordinates)
-                    ),
-                        columns=["mzs", "intensities", "coordinates"]
-            )
-    print('starting long_df creation...')
-    long_df = df.explode(['mzs', 'intensities']).reset_index(drop=True)
-    long_df["mzs"] = long_df["mzs"].astype(float)
 
-    print('filtering on desired mzs')
-    targets = targets #[403.2628] for immmunce cell mask 
-    mask = np.zeros(len(long_df), dtype=bool)
-    print('running loop for booleans')
+    # Precompute tolerances
+    targets = np.asarray(targets, dtype=float)
+    tols = targets * ppm / 1e6
 
-    for t in targets:
-        tol = t * ppm / 1e6
-        mask |= (long_df["mzs"].between(t - tol, t + tol))
-    print('wide format...')
-    # filter 
-    filtered_df = long_df.loc[mask].copy()
-    sf_df = filtered_df.pivot_table(
-        index='coordinates', columns='mzs',
-        values='intensities', aggfunc='sum',
-    )
-    # bring all pixels back — missing ones become NaN rows
-    sf_df = sf_df.reindex(df['coordinates']).fillna(0)
-    sf_df.columns = [f"mz_{col:.4f}" for col in sf_df.columns]
-    sum_filter = sf_df.sum(axis=1).to_frame()
-    sum_filter.columns = [sf_df.columns[0]]
-    return sum_filter
+    # Accumulate per‑pixel sums
+    coords = []
+    sums = []
 
+    for idx, coord in enumerate(parser.coordinates):
+        mzs, intens = parser.getspectrum(idx)
+
+        mzs = np.asarray(mzs, dtype=float)
+        intens = np.asarray(intens, dtype=float)
+
+        # Boolean mask for ANY target window
+        mask = np.zeros_like(mzs, dtype=bool)
+        for t, tol in zip(targets, tols):
+            mask |= (mzs >= t - tol) & (mzs <= t + tol)
+
+        # Sum intensities for this pixel
+        sums.append(intens[mask].sum())
+        coords.append(tuple(coord))
+
+    # Build final DataFrame
+    df = pd.DataFrame({
+        "coordinates": coords,
+        f"mz_{targets[0]:.4f}": sums
+    })
+
+    return df
 
 if __name__ == "__main__":
     print("This is a module for multimodal registration using SPACO and SpectrumData classes.")
