@@ -257,7 +257,7 @@ def pick_landmarks_matplotlib(he_image, maldi_image, n_points):
 class MALDIRegistration:
 
     def __init__(self, he_path, maldi_path,
-                 imzml_path="MSI_data_grant/Mass_Spec_data/20251012_old_liver.imzML"):
+                 imzml_path="/home/kia/MALDI_Metabolomics/MSI_data_grant/Mass_Spec_data/20251012_old_liver.imzML"):
         self.parser = ImzMLParser(imzml_path)
         self.maldi_df = pd.DataFrame(
             ((*self.parser.getspectrum(idx), coord)

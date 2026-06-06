@@ -218,6 +218,7 @@ img_folder/
 *.ibd
 *.imzML
 23925426/
+*.h5*
 
 # hidden env folders: 
 .config/
@@ -232,3 +233,4 @@ img_folder/
 space_ranger*/
 square_002um/
 data/
+
