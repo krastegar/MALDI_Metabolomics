@@ -802,11 +802,11 @@ def run_registration_pipeline(he_path, maldi_path, n_landmarks=8,
 
 if __name__ == "__main__":
 
-    HE_PATH    = "high_res_MSI/D2_10x_originalExport.tif"
-    MALDI_PATH = "img_folder/Taurine_img_withoutborders.tif"
-    OUTPUT_DIR = "registration_outputs"
+    FULL_HE_PATH    = "/home/kia/MALDI_Metabolomics/kidney_test/HE_fake_img.png"
+    MALDI_IMG_PATH = "/home/kia/MALDI_Metabolomics/kidney_test/maldi_test_img.png"
+    GLOBALREG_OUTPUT_DIR = "/home/kia/MALDI_Metabolomics/kidney_test"
 
-    USE_SAVED_LANDMARKS = True
+    USE_SAVED_LANDMARKS = False
     LANDMARKS = {
         'he': [
             [7612.3, 4264.6], [8810.7, 6485.2], [10424.6, 7485.0],
@@ -821,17 +821,17 @@ if __name__ == "__main__":
     }
 
     registration = run_registration_pipeline(
-        he_path=HE_PATH,
-        maldi_path=MALDI_PATH,
-        n_landmarks=8,
-        save_coords=True,
-        grid_spacing=1,
-        tissue_only=True,
-        output_dir=OUTPUT_DIR,
-        use_napari=True,
-        use_full_affine=False,
-        use_saved_landmarks=USE_SAVED_LANDMARKS,
-        landmarks=LANDMARKS,
-        max_residual_px=None,
-        auto_boundary_align=True,
-    )
+            he_path=FULL_HE_PATH,
+            maldi_path=MALDI_IMG_PATH,
+            n_landmarks=4,
+            save_coords=True,
+            grid_spacing=1,
+            tissue_only=True,
+            output_dir=GLOBALREG_OUTPUT_DIR,
+            use_napari=True,
+            use_full_affine=False,
+            use_saved_landmarks=USE_SAVED_LANDMARKS,
+            landmarks=LANDMARKS,
+            max_residual_px=None,
+            auto_boundary_align=True,
+        )
