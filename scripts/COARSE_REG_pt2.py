@@ -251,479 +251,503 @@ def pick_landmarks_matplotlib(he_image, maldi_image, n_points):
 
 
 # ===========================================================================
-#  MAIN REGISTRATION CLASS
+#  REGISTRATION FUNCTIONS
 # ===========================================================================
 
-class MALDIRegistration:
+def initialize_registration(he_path, maldi_path, output_dir=Path("."),
+                            imzml_path="/home/kia/MALDI_Metabolomics/MSI_data_grant/Mass_Spec_data/20251012_old_liver.imzML"):
+    """Load inputs and return the mutable registration state."""
+    parser = ImzMLParser(imzml_path)
+    maldi_df = pd.DataFrame(
+        ((*parser.getspectrum(idx), coord)
+         for idx, coord in enumerate(parser.coordinates)),
+        columns=["mzs", "intensities", "coordinates"]
+    )
 
-    def __init__(self, he_path, maldi_path,
-                 imzml_path="/home/kia/MALDI_Metabolomics/MSI_data_grant/Mass_Spec_data/20251012_old_liver.imzML"):
-        self.parser = ImzMLParser(imzml_path)
-        self.maldi_df = pd.DataFrame(
-            ((*self.parser.getspectrum(idx), coord)
-             for idx, coord in enumerate(self.parser.coordinates)),
-            columns=["mzs", "intensities", "coordinates"]
-        )
-        self.he_image    = load_he_image(he_path)
-        self.maldi_image = cv2.imread(maldi_path, cv2.IMREAD_UNCHANGED)
-        if self.maldi_image.shape[2] == 4:
-            self.maldi_image = cv2.cvtColor(self.maldi_image, cv2.COLOR_BGRA2RGBA)
+    he_image = load_he_image(he_path)
+    maldi_image = cv2.imread(maldi_path, cv2.IMREAD_UNCHANGED)
+    if maldi_image is None:
+        raise FileNotFoundError(f"Cannot open MALDI image: {maldi_path}")
+    if maldi_image.ndim == 2:
+        maldi_image = np.stack([maldi_image, maldi_image, maldi_image], axis=-1)
+    if maldi_image.shape[2] == 4:
+        maldi_image = cv2.cvtColor(maldi_image, cv2.COLOR_BGRA2RGBA)
 
-        self.he_shape    = self.he_image.shape[:2]
-        self.maldi_shape = self.maldi_image.shape[:2]
+    he_shape = he_image.shape[:2]
+    maldi_shape = maldi_image.shape[:2]
 
-        maldi_rgb = self.maldi_image[:, :, :3]
-        self.maldi_gray = (0.299*maldi_rgb[:,:,0] +
-                           0.587*maldi_rgb[:,:,1] +
-                           0.114*maldi_rgb[:,:,2]) / 255.0
-        self.he_gray    = (0.299*self.he_image[:,:,0] +
-                           0.587*self.he_image[:,:,1] +
-                           0.114*self.he_image[:,:,2]) / 255.0
+    maldi_rgb = maldi_image[:, :, :3]
+    maldi_gray = (0.299*maldi_rgb[:, :, 0] +
+                  0.587*maldi_rgb[:, :, 1] +
+                  0.114*maldi_rgb[:, :, 2]) / 255.0
+    he_gray = (0.299*he_image[:, :, 0] +
+               0.587*he_image[:, :, 1] +
+               0.114*he_image[:, :, 2]) / 255.0
 
-        self.he_landmarks        = []
-        self.maldi_landmarks     = []
-        self.affine_matrix       = None
-        self.refined_affine      = None
-        self.registered_affine   = None
-        self.registered_nonrigid = None
-        self.maldi_grid          = None
-        self.displacement_field_x = None
-        self.displacement_field_y = None
-        self.rbf_x = None
-        self.rbf_y = None
-        self._out_dir = Path(".")
+    reg = {
+        "parser": parser,
+        "maldi_df": maldi_df,
+        "he_image": he_image,
+        "maldi_image": maldi_image,
+        "he_shape": he_shape,
+        "maldi_shape": maldi_shape,
+        "maldi_gray": maldi_gray,
+        "he_gray": he_gray,
+        "he_landmarks": [],
+        "maldi_landmarks": [],
+        "affine_matrix": None,
+        "refined_affine": None,
+        "registered_affine": None,
+        "registered_nonrigid": None,
+        "maldi_grid": None,
+        "displacement_field_x": None,
+        "displacement_field_y": None,
+        "rbf_x": None,
+        "rbf_y": None,
+        "landmark_residuals": None,
+        "out_dir": Path(output_dir),
+    }
 
-        print(f"Loaded H&E image:   {self.he_shape}")
-        print(f"Loaded MALDI image: {self.maldi_shape}")
+    print(f"Loaded H&E image:   {he_shape}")
+    print(f"Loaded MALDI image: {maldi_shape}")
+    return reg
 
-    # ------------------------------------------------------------------
-    def select_landmarks(self, n_points=8, use_napari=True):
-        if use_napari:
-            he_pts, maldi_pts = pick_landmarks_napari(
-                self.he_image, self.maldi_image, n_points)
-            if he_pts is None:
-                he_pts, maldi_pts = pick_landmarks_matplotlib(
-                    self.he_image, self.maldi_image, n_points)
-        else:
+
+def select_landmarks(reg, n_points=8, use_napari=True):
+    if use_napari:
+        he_pts, maldi_pts = pick_landmarks_napari(
+            reg["he_image"], reg["maldi_image"], n_points)
+        if he_pts is None:
             he_pts, maldi_pts = pick_landmarks_matplotlib(
-                self.he_image, self.maldi_image, n_points)
-        self.he_landmarks    = np.array(he_pts,    dtype=float)
-        self.maldi_landmarks = np.array(maldi_pts, dtype=float)
-        print(f"Collected {len(self.he_landmarks)} landmark pairs.")
+                reg["he_image"], reg["maldi_image"], n_points)
+    else:
+        he_pts, maldi_pts = pick_landmarks_matplotlib(
+            reg["he_image"], reg["maldi_image"], n_points)
+    reg["he_landmarks"] = np.array(he_pts, dtype=float)
+    reg["maldi_landmarks"] = np.array(maldi_pts, dtype=float)
+    print(f"Collected {len(reg['he_landmarks'])} landmark pairs.")
+    return reg
 
-    def load_landmarks_from_dict(self, landmarks):
-        he    = landmarks.get('he', [])
-        maldi = landmarks.get('maldi', [])
-        if len(he) != len(maldi):
-            raise ValueError(f"Count mismatch: {len(he)} H&E vs {len(maldi)} MALDI.")
-        if len(he) < 3:
-            raise ValueError(f"Need >=3 pairs, got {len(he)}.")
-        self.he_landmarks    = np.array(he,    dtype=float)
-        self.maldi_landmarks = np.array(maldi, dtype=float)
-        print(f"Loaded {len(he)} landmark pairs from dictionary.")
 
-    # ------------------------------------------------------------------
-    def align_tissue_boundaries(self, rotation_step_deg=2.0,
-                                  coarse_downsample=32, fine_downsample=8):
-        """
-        Exhaustive rotation search using COLOUR-BASED tissue masks.
+def load_landmarks_from_dict(reg, landmarks):
+    he = landmarks.get('he', [])
+    maldi = landmarks.get('maldi', [])
+    if len(he) != len(maldi):
+        raise ValueError(f"Count mismatch: {len(he)} H&E vs {len(maldi)} MALDI.")
+    if len(he) < 3:
+        raise ValueError(f"Need >=3 pairs, got {len(he)}.")
+    reg["he_landmarks"] = np.array(he, dtype=float)
+    reg["maldi_landmarks"] = np.array(maldi, dtype=float)
+    print(f"Loaded {len(he)} landmark pairs from dictionary.")
+    return reg
 
-        Uses HSV saturation for H&E (tissue=pink/purple, background=white)
-        and local variance for MALDI (tissue=variable, background=flat grey).
-        These are far more reliable than Otsu on grayscale for these modalities.
-        """
-        print("\nAuto-aligning tissue boundaries (exhaustive rotation search)...")
-        out = getattr(self, '_out_dir', Path('.'))
 
-        #he_mask    = make_tissue_mask_he(self.he_image)
-        he_mask = make_tissue_mask_maldi(self.he_gray)
-        maldi_mask = make_tissue_mask_maldi(self.maldi_gray)
+def align_tissue_boundaries(reg, rotation_step_deg=2.0,
+                            coarse_downsample=32, fine_downsample=8):
+    """
+    Exhaustive rotation search using COLOUR-BASED tissue masks.
 
-        # Save debug masks
-        cv2.imwrite(str(out / 'debug_he_mask.png'),    he_mask * 255)
-        cv2.imwrite(str(out / 'debug_maldi_mask.png'), maldi_mask * 255)
-        print(f"  Saved tissue masks -> {out} (check if they look right)")
+    Uses HSV saturation for H&E (tissue=pink/purple, background=white)
+    and local variance for MALDI (tissue=variable, background=flat grey).
+    These are far more reliable than Otsu on grayscale for these modalities.
+    """
+    print("\nAuto-aligning tissue boundaries (exhaustive rotation search)...")
+    out = reg.get("out_dir", Path("."))
 
-        def centroid_area(mask):
-            M = cv2.moments(mask.astype(np.float32))
-            if M["m00"] < 1:
-                raise RuntimeError(
-                    "Empty tissue mask -- check debug masks in output dir.")
-            return M["m10"]/M["m00"], M["m01"]/M["m00"], M["m00"]
+    # he_mask = make_tissue_mask_he(reg["he_image"])
+    he_mask = make_tissue_mask_maldi(reg["he_gray"])
+    maldi_mask = make_tissue_mask_maldi(reg["maldi_gray"])
 
-        he_cx,    he_cy,    he_area    = centroid_area(he_mask)
-        maldi_cx, maldi_cy, maldi_area = centroid_area(maldi_mask)
-        scale = np.sqrt(he_area / (maldi_area + 1e-8))
-        print(f"  H&E centroid:   ({he_cx:.0f}, {he_cy:.0f})")
-        print(f"  MALDI centroid: ({maldi_cx:.0f}, {maldi_cy:.0f})")
-        print(f"  Scale estimate: {scale:.3f}")
+    cv2.imwrite(str(out / 'debug_he_mask.png'), he_mask * 255)
+    cv2.imwrite(str(out / 'debug_maldi_mask.png'), maldi_mask * 255)
+    print(f"  Saved tissue masks -> {out} (check if they look right)")
 
-        def build_mat(s, r):
-            cos_r, sin_r = np.cos(r), np.sin(r)
-            tx = he_cx - s*(cos_r*maldi_cx - sin_r*maldi_cy)
-            ty = he_cy - s*(sin_r*maldi_cx + cos_r*maldi_cy)
-            return np.array([[s*cos_r, -s*sin_r, tx],
-                             [s*sin_r,  s*cos_r, ty],
-                             [0,        0,        1]])
+    def centroid_area(mask):
+        M = cv2.moments(mask.astype(np.float32))
+        if M["m00"] < 1:
+            raise RuntimeError(
+                "Empty tissue mask -- check debug masks in output dir.")
+        return M["m10"]/M["m00"], M["m01"]/M["m00"], M["m00"]
 
-        # Coarse masks
-        d = coarse_downsample
-        sw_c = self.he_shape[1] // d;  sh_c = self.he_shape[0] // d
-        h_c  = cv2.resize(he_mask.astype(np.float32),    (sw_c, sh_c))
-        m_c  = cv2.resize(maldi_mask.astype(np.float32),
-                          (self.maldi_shape[1]//d, self.maldi_shape[0]//d))
+    he_cx, he_cy, he_area = centroid_area(he_mask)
+    maldi_cx, maldi_cy, maldi_area = centroid_area(maldi_mask)
+    scale = np.sqrt(he_area / (maldi_area + 1e-8))
+    print(f"  H&E centroid:   ({he_cx:.0f}, {he_cy:.0f})")
+    print(f"  MALDI centroid: ({maldi_cx:.0f}, {maldi_cy:.0f})")
+    print(f"  Scale estimate: {scale:.3f}")
 
-        def iou_coarse(mat_full):
-            mat_d = mat_full[:2, :].copy(); mat_d[:, 2] /= d
-            warped = cv2.warpAffine(m_c, mat_d, (sw_c, sh_c), flags=cv2.INTER_LINEAR)
-            inter  = np.minimum(warped, h_c).sum()
-            union  = np.maximum(warped, h_c).sum()
-            return inter / (union + 1e-8)
-
-        # Exhaustive search
-        angles = np.arange(0, 360, rotation_step_deg)
-        print(f"\n  Exhaustive search: {len(angles)} angles at 1/{d} "
-              f"({sw_c}x{sh_c} px)...")
-        ious = np.array([iou_coarse(build_mat(scale, np.radians(a)))
-                         for a in angles])
-
-        top5 = np.argsort(ious)[-5:][::-1]
-        print(f"  Top 5 candidates:")
-        for idx in top5:
-            print(f"    {angles[idx]:6.1f} deg  IoU={ious[idx]:.4f}")
-        best_angle = angles[np.argmax(ious)]
-        print(f"  Best: {best_angle:.1f} deg  IoU={ious.max():.4f}")
-
-        # Fine Powell refinement
-        d2 = fine_downsample
-        sw_f = self.he_shape[1]//d2;  sh_f = self.he_shape[0]//d2
-        h_f  = cv2.resize(he_mask.astype(np.float32),    (sw_f, sh_f))
-        m_f  = cv2.resize(maldi_mask.astype(np.float32),
-                          (self.maldi_shape[1]//d2, self.maldi_shape[0]//d2))
-
-        best_mat = build_mat(scale, np.radians(best_angle))
-        p0 = np.array([scale, np.radians(best_angle),
-                       best_mat[0,2], best_mat[1,2]])
-
-        calls = [0]
-        def cost(p):
-            calls[0] += 1
-            s, r, tx, ty = p
-            cos_r, sin_r = np.cos(r), np.sin(r)
-            mat = np.array([[s*cos_r, -s*sin_r, tx/d2],
-                            [s*sin_r,  s*cos_r, ty/d2]])
-            w = cv2.warpAffine(m_f, mat, (sw_f, sh_f), flags=cv2.INTER_LINEAR)
-            return -(np.minimum(w, h_f).sum() / (np.maximum(w, h_f).sum()+1e-8))
-
-        print(f"\n  Powell refinement at 1/{d2} ({sw_f}x{sh_f} px)...")
-        res = minimize(cost, p0, method='Powell',
-                       options={'maxiter': 600, 'ftol': 1e-7})
-        s, r, tx, ty = res.x
+    def build_mat(s, r):
         cos_r, sin_r = np.cos(r), np.sin(r)
-        self.affine_matrix = np.array([[s*cos_r, -s*sin_r, tx],
-                                        [s*sin_r,  s*cos_r, ty],
-                                        [0,        0,        1]])
-        final_iou = -res.fun
-        print(f"  Refined: scale={s:.4f}, rot={np.degrees(r):.2f} deg, "
-              f"IoU={final_iou:.4f}, evals={calls[0]}")
+        tx = he_cx - s*(cos_r*maldi_cx - sin_r*maldi_cy)
+        ty = he_cy - s*(sin_r*maldi_cx + cos_r*maldi_cy)
+        return np.array([[s*cos_r, -s*sin_r, tx],
+                         [s*sin_r,  s*cos_r, ty],
+                         [0,        0,        1]])
 
-        self.registered_affine = cv2.warpAffine(
-            self.maldi_gray, self.affine_matrix[:2,:],
-            (self.he_shape[1], self.he_shape[0]),
-            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    d = coarse_downsample
+    sw_c = reg["he_shape"][1] // d
+    sh_c = reg["he_shape"][0] // d
+    h_c = cv2.resize(he_mask.astype(np.float32), (sw_c, sh_c))
+    m_c = cv2.resize(maldi_mask.astype(np.float32),
+                     (reg["maldi_shape"][1]//d, reg["maldi_shape"][0]//d))
 
-        if final_iou < 0.4:
-            print(f"  WARNING: IoU={final_iou:.3f} is low. "
-                  f"Check debug masks in {out}")
-        return final_iou
+    def iou_coarse(mat_full):
+        mat_d = mat_full[:2, :].copy()
+        mat_d[:, 2] /= d
+        warped = cv2.warpAffine(m_c, mat_d, (sw_c, sh_c), flags=cv2.INTER_LINEAR)
+        inter = np.minimum(warped, h_c).sum()
+        union = np.maximum(warped, h_c).sum()
+        return inter / (union + 1e-8)
 
-    # ------------------------------------------------------------------
-    def compute_affine_transform(self, use_full_affine=False, max_residual_px=None):
-        """
-        Fit similarity/affine from landmarks and print per-point residuals.
-        This result IS the refined_affine -- no separate MI step needed
-        when landmark residuals are already <50 px.
-        """
-        print(f"\nComputing landmark transform (full_affine={use_full_affine})...")
-        if len(self.he_landmarks) < 3:
-            raise ValueError(f"Need >=3 pairs, got {len(self.he_landmarks)}")
+    angles = np.arange(0, 360, rotation_step_deg)
+    print(f"\n  Exhaustive search: {len(angles)} angles at 1/{d} "
+          f"({sw_c}x{sh_c} px)...")
+    ious = np.array([iou_coarse(build_mat(scale, np.radians(a)))
+                     for a in angles])
 
-        tform = (transform.AffineTransform() if use_full_affine
-                 else transform.SimilarityTransform())
-        if not tform.estimate(self.maldi_landmarks, self.he_landmarks):
-            raise RuntimeError("Transform estimation failed -- check landmarks.")
+    top5 = np.argsort(ious)[-5:][::-1]
+    print(f"  Top 5 candidates:")
+    for idx in top5:
+        print(f"    {angles[idx]:6.1f} deg  IoU={ious[idx]:.4f}")
+    best_angle = angles[np.argmax(ious)]
+    print(f"  Best: {best_angle:.1f} deg  IoU={ious.max():.4f}")
 
-        self.affine_matrix  = tform.params
-        # Set refined_affine directly -- this is our best global transform
-        self.refined_affine = tform.params.copy()
+    d2 = fine_downsample
+    sw_f = reg["he_shape"][1] // d2
+    sh_f = reg["he_shape"][0] // d2
+    h_f = cv2.resize(he_mask.astype(np.float32), (sw_f, sh_f))
+    m_f = cv2.resize(maldi_mask.astype(np.float32),
+                     (reg["maldi_shape"][1]//d2, reg["maldi_shape"][0]//d2))
 
-        hom       = np.column_stack([self.maldi_landmarks,
-                                      np.ones(len(self.maldi_landmarks))])
-        predicted = (self.affine_matrix @ hom.T).T[:, :2]
-        residuals = np.linalg.norm(predicted - self.he_landmarks, axis=1)
+    best_mat = build_mat(scale, np.radians(best_angle))
+    p0 = np.array([scale, np.radians(best_angle),
+                   best_mat[0, 2], best_mat[1, 2]])
 
-        print(f"\n  Landmark residuals (H&E pixels):")
-        print(f"  {'#':>3}  {'H&E':>22}  {'pred':>22}  {'err':>8}")
-        print(f"  {'-'*60}")
-        bad = []
-        for i, (he, pred, err) in enumerate(zip(self.he_landmarks, predicted, residuals)):
-            flag = "  << re-pick" if err > 100 else ("  < check" if err > 50 else "")
-            if err > 100: bad.append(i+1)
-            print(f"  {i+1:>3}  ({he[0]:8.1f},{he[1]:8.1f})  "
-                  f"({pred[0]:8.1f},{pred[1]:8.1f})  {err:>8.1f}{flag}")
-        print(f"  {'-'*60}")
-        print(f"  Mean: {residuals.mean():.1f} px  "
-              f"Median: {np.median(residuals):.1f} px  "
-              f"Max: {residuals.max():.1f} px (point #{residuals.argmax()+1})")
-        if bad:
-            print(f"\n  WARNING: points {bad} have large residuals -- consider re-picking.")
-        if max_residual_px and residuals.max() > max_residual_px:
-            raise ValueError(f"Max residual {residuals.max():.1f} > {max_residual_px} px. "
-                             f"Re-pick bad pairs: {bad}")
-        self.landmark_residuals = residuals
+    calls = [0]
 
-        self.registered_affine = cv2.warpAffine(
-            self.maldi_gray, self.affine_matrix[:2,:],
-            (self.he_shape[1], self.he_shape[0]),
-            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        print("\nInitial affine applied (this IS the refined affine -- no MI step needed).")
-        return residuals
+    def cost(p):
+        calls[0] += 1
+        s, r, tx, ty = p
+        cos_r, sin_r = np.cos(r), np.sin(r)
+        mat = np.array([[s*cos_r, -s*sin_r, tx/d2],
+                        [s*sin_r,  s*cos_r, ty/d2]])
+        w = cv2.warpAffine(m_f, mat, (sw_f, sh_f), flags=cv2.INTER_LINEAR)
+        return -(np.minimum(w, h_f).sum() / (np.maximum(w, h_f).sum()+1e-8))
 
-    # ------------------------------------------------------------------
-    def extract_tissue_mask(self, image, threshold=0.1):
-        mask = image > threshold
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, k)
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
-        return mask.astype(bool)
+    print(f"\n  Powell refinement at 1/{d2} ({sw_f}x{sh_f} px)...")
+    res = minimize(cost, p0, method='Powell',
+                   options={'maxiter': 600, 'ftol': 1e-7})
+    s, r, tx, ty = res.x
+    cos_r, sin_r = np.cos(r), np.sin(r)
+    reg["affine_matrix"] = np.array([[s*cos_r, -s*sin_r, tx],
+                                     [s*sin_r,  s*cos_r, ty],
+                                     [0,        0,        1]])
+    final_iou = -res.fun
+    print(f"  Refined: scale={s:.4f}, rot={np.degrees(r):.2f} deg, "
+          f"IoU={final_iou:.4f}, evals={calls[0]}")
 
-    # ------------------------------------------------------------------
-    def apply_nonrigid_deformation(self):
-        """TPS non-rigid deformation from vessel landmarks."""
-        print(f"\nApplying non-rigid TPS deformation...")
+    reg["registered_affine"] = cv2.warpAffine(
+        reg["maldi_gray"], reg["affine_matrix"][:2, :],
+        (reg["he_shape"][1], reg["he_shape"][0]),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
-        maldi_lm_transformed = cv2.transform(
-            self.maldi_landmarks.reshape(-1, 1, 2),
-            self.refined_affine[:2, :]
-        ).reshape(-1, 2)
+    if final_iou < 0.4:
+        print(f"  WARNING: IoU={final_iou:.3f} is low. "
+              f"Check debug masks in {out}")
+    return final_iou
 
-        displacements = self.he_landmarks - maldi_lm_transformed
 
-        self.rbf_x = RBFInterpolator(maldi_lm_transformed, displacements[:, 0],
-                                      kernel='thin_plate_spline', smoothing=0.0)
-        self.rbf_y = RBFInterpolator(maldi_lm_transformed, displacements[:, 1],
-                                      kernel='thin_plate_spline', smoothing=0.0)
+def compute_affine_transform(reg, use_full_affine=False, max_residual_px=None):
+    """
+    Fit similarity/affine from landmarks and print per-point residuals.
+    This result IS the refined_affine -- no separate MI step needed
+    when landmark residuals are already <50 px.
+    """
+    print(f"\nComputing landmark transform (full_affine={use_full_affine})...")
+    if len(reg["he_landmarks"]) < 3:
+        raise ValueError(f"Need >=3 pairs, got {len(reg['he_landmarks'])}")
 
-        y_coords, x_coords = np.mgrid[0:self.he_shape[0], 0:self.he_shape[1]]
-        points = np.column_stack([x_coords.ravel(), y_coords.ravel()])
-        print(f"Computing displacement field ({len(points):,} points)...")
+    tform = (transform.AffineTransform() if use_full_affine
+             else transform.SimilarityTransform())
+    if not tform.estimate(reg["maldi_landmarks"], reg["he_landmarks"]):
+        raise RuntimeError("Transform estimation failed -- check landmarks.")
 
-        dx = self.rbf_x(points).reshape(self.he_shape)
-        dy = self.rbf_y(points).reshape(self.he_shape)
-        self.displacement_field_x = dx
-        self.displacement_field_y = dy
+    reg["affine_matrix"] = tform.params
+    reg["refined_affine"] = tform.params.copy()
 
-        map_x = (x_coords - dx).astype(np.float32)
-        map_y = (y_coords - dy).astype(np.float32)
+    hom = np.column_stack([reg["maldi_landmarks"],
+                           np.ones(len(reg["maldi_landmarks"]))])
+    predicted = (reg["affine_matrix"] @ hom.T).T[:, :2]
+    residuals = np.linalg.norm(predicted - reg["he_landmarks"], axis=1)
 
-        self.registered_nonrigid = cv2.remap(
-            self.registered_affine, map_x, map_y,
-            interpolation=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        print("Non-rigid deformation complete.")
+    print(f"\n  Landmark residuals (H&E pixels):")
+    print(f"  {'#':>3}  {'H&E':>22}  {'pred':>22}  {'err':>8}")
+    print(f"  {'-'*60}")
+    bad = []
+    for i, (he, pred, err) in enumerate(zip(reg["he_landmarks"], predicted, residuals)):
+        flag = "  << re-pick" if err > 100 else ("  < check" if err > 50 else "")
+        if err > 100:
+            bad.append(i+1)
+        print(f"  {i+1:>3}  ({he[0]:8.1f},{he[1]:8.1f})  "
+              f"({pred[0]:8.1f},{pred[1]:8.1f})  {err:>8.1f}{flag}")
+    print(f"  {'-'*60}")
+    print(f"  Mean: {residuals.mean():.1f} px  "
+          f"Median: {np.median(residuals):.1f} px  "
+          f"Max: {residuals.max():.1f} px (point #{residuals.argmax()+1})")
+    if bad:
+        print(f"\n  WARNING: points {bad} have large residuals -- consider re-picking.")
+    if max_residual_px and residuals.max() > max_residual_px:
+        raise ValueError(f"Max residual {residuals.max():.1f} > {max_residual_px} px. "
+                         f"Re-pick bad pairs: {bad}")
+    reg["landmark_residuals"] = residuals
 
-    # ------------------------------------------------------------------
-    def transform_maldi_to_he_coordinates(self, maldi_coords):
-        if self.refined_affine is None or self.rbf_x is None:
-            raise RuntimeError("Complete registration pipeline first.")
-        maldi_coords = np.atleast_2d(maldi_coords).copy()
-        maldi_coords[:, 0] = np.clip(maldi_coords[:, 0], 0, self.maldi_shape[1]-1)
-        maldi_coords[:, 1] = np.clip(maldi_coords[:, 1], 0, self.maldi_shape[0]-1)
-        hom = np.column_stack([maldi_coords, np.ones(len(maldi_coords))])
-        affine_coords = (self.refined_affine @ hom.T).T[:, :2]
-        dx = self.rbf_x(affine_coords)
-        dy = self.rbf_y(affine_coords)
-        return affine_coords + np.column_stack([dx, dy])
+    reg["registered_affine"] = cv2.warpAffine(
+        reg["maldi_gray"], reg["affine_matrix"][:2, :],
+        (reg["he_shape"][1], reg["he_shape"][0]),
+        flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    print("\nInitial affine applied (this IS the refined affine -- no MI step needed).")
+    return residuals
 
-    def transform_he_to_maldi_coordinates(self, he_coords,
-                                           max_iterations=50, tolerance=0.5):
-        if self.refined_affine is None or self.rbf_x is None:
-            raise RuntimeError("Complete registration pipeline first.")
-        he_coords    = np.atleast_2d(he_coords)
-        maldi_coords = np.zeros_like(he_coords)
-        affine_inv   = np.linalg.inv(self.refined_affine)
-        for i, target in enumerate(he_coords):
-            guess = (affine_inv @ np.append(target, 1))[:2]
-            for _ in range(max_iterations):
-                predicted = self.transform_maldi_to_he_coordinates(
-                    guess.reshape(1, -1))[0]
-                err = np.linalg.norm(predicted - target)
-                if err < tolerance: break
-                guess -= 0.5 * (predicted - target)
-            maldi_coords[i] = guess
-        return maldi_coords
 
-    # ------------------------------------------------------------------
-    def create_coordinate_mapping_grid(self, grid_spacing=1, tissue_only=True,
-                                        intensity_threshold=0.1):
-        print(f"Creating coordinate mapping (spacing={grid_spacing})...")
-        if tissue_only:
-            # imzML coords are 1-indexed -- subtract 1 for 0-based indexing
-            tissue_coords = (np.asarray([c[:2] for c in self.maldi_df['coordinates']])
-                             - 1)
-            maldi_grid = (tissue_coords if grid_spacing == 1
-                          else tissue_coords[::grid_spacing])
-        else:
-            y = np.arange(0, self.maldi_shape[0], grid_spacing)
-            x = np.arange(0, self.maldi_shape[1], grid_spacing)
-            xv, yv = np.meshgrid(x, y)
-            maldi_grid = np.column_stack([xv.ravel(), yv.ravel()])
-        print(f"  Transforming {len(maldi_grid):,} coordinates...")
-        he_grid = self.transform_maldi_to_he_coordinates(maldi_grid)
-        self.maldi_grid = maldi_grid
-        df = pd.DataFrame({'maldi_x': maldi_grid[:,0], 'maldi_y': maldi_grid[:,1],
-                           'he_x':    he_grid[:,0],    'he_y':    he_grid[:,1]})
-        print(f"  Generated {len(df):,} coordinate mappings")
-        return df
+def extract_tissue_mask(image, threshold=0.1):
+    mask = image > threshold
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, k)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    return mask.astype(bool)
 
-    def save_coordinate_mapping(self, output_path='coordinate_mapping.csv',
-                                 grid_spacing=1, tissue_only=True,
-                                 intensity_threshold=0.1):
-        df = self.create_coordinate_mapping_grid(grid_spacing, tissue_only,
-                                                  intensity_threshold)
-        df.to_csv(output_path, index=False)
-        print(f"Saved coordinate mapping -> '{output_path}' ({len(df):,} rows)")
-        return df
 
-    # ------------------------------------------------------------------
-    def visualize_results(self, max_display_px=2048):
-        """Four-panel figure, downsampled to avoid matplotlib crash."""
-        print("\nGenerating registration visualisation...")
-        max_he = max(self.he_shape)
-        scale  = min(1.0, max_display_px / max_he)
-        dh = int(self.he_shape[0] * scale)
-        dw = int(self.he_shape[1] * scale)
-        print(f"  Display: {self.he_shape[1]}x{self.he_shape[0]} -> {dw}x{dh} "
-              f"(scale={scale:.3f})")
+def apply_nonrigid_deformation(reg):
+    """TPS non-rigid deformation from vessel landmarks."""
+    print(f"\nApplying non-rigid TPS deformation...")
 
-        he_d   = cv2.resize(self.he_image,   (dw, dh), interpolation=cv2.INTER_AREA)
-        heg_d  = cv2.resize(self.he_gray,    (dw, dh), interpolation=cv2.INTER_AREA)
-        maldi_d = cv2.resize(self.maldi_gray, (dw, dh), interpolation=cv2.INTER_AREA)
-        aff_d  = (cv2.resize(self.registered_affine,   (dw, dh), interpolation=cv2.INTER_AREA)
-                  if self.registered_affine  is not None else None)
-        nr_d   = (cv2.resize(self.registered_nonrigid, (dw, dh), interpolation=cv2.INTER_AREA)
-                  if self.registered_nonrigid is not None else None)
+    maldi_lm_transformed = cv2.transform(
+        reg["maldi_landmarks"].reshape(-1, 1, 2),
+        reg["refined_affine"][:2, :]
+    ).reshape(-1, 2)
 
-        he_lm_d = self.he_landmarks * scale
+    displacements = reg["he_landmarks"] - maldi_lm_transformed
 
-        def blend(a, b, alpha=0.5):
-            a = (a-a.min())/(a.max()-a.min()+1e-8)
-            b = (b-b.min())/(b.max()-b.min()+1e-8)
-            return alpha*a + (1-alpha)*b
+    reg["rbf_x"] = RBFInterpolator(maldi_lm_transformed, displacements[:, 0],
+                                   kernel='thin_plate_spline', smoothing=0.0)
+    reg["rbf_y"] = RBFInterpolator(maldi_lm_transformed, displacements[:, 1],
+                                   kernel='thin_plate_spline', smoothing=0.0)
 
-        fig, axes = plt.subplots(2, 2, figsize=(16, 16))
+    y_coords, x_coords = np.mgrid[0:reg["he_shape"][0], 0:reg["he_shape"][1]]
+    points = np.column_stack([x_coords.ravel(), y_coords.ravel()])
+    print(f"Computing displacement field ({len(points):,} points)...")
 
-        axes[0,0].imshow(blend(heg_d, maldi_d), cmap='gray')
-        axes[0,0].set_title('Original (No Registration)', fontsize=14, fontweight='bold')
-        axes[0,0].axis('off')
+    dx = reg["rbf_x"](points).reshape(reg["he_shape"])
+    dy = reg["rbf_y"](points).reshape(reg["he_shape"])
+    reg["displacement_field_x"] = dx
+    reg["displacement_field_y"] = dy
 
-        axes[0,1].imshow(he_d)
-        if self.refined_affine is not None:
-            mt = (cv2.transform(self.maldi_landmarks.reshape(-1,1,2),
-                               self.refined_affine[:2,:]).reshape(-1,2) * scale)
-            for i in range(len(he_lm_d)):
-                axes[0,1].plot([he_lm_d[i,0], mt[i,0]],
-                               [he_lm_d[i,1], mt[i,1]], 'y-', lw=2, alpha=0.6)
-                axes[0,1].plot(*he_lm_d[i], 'ro', markersize=10,
-                               markeredgecolor='white', markeredgewidth=2)
-                axes[0,1].plot(*mt[i], 'bo', markersize=10,
-                               markeredgecolor='white', markeredgewidth=2)
-                axes[0,1].text(he_lm_d[i,0]+6, he_lm_d[i,1]-6,
-                               str(i+1), color='yellow', fontsize=9, fontweight='bold')
-        axes[0,1].set_title('Landmark Correspondence', fontsize=14, fontweight='bold')
-        axes[0,1].axis('off')
+    map_x = (x_coords - dx).astype(np.float32)
+    map_y = (y_coords - dy).astype(np.float32)
 
-        if aff_d is not None:
-            axes[1,0].imshow(blend(heg_d, aff_d), cmap='gray')
-            axes[1,0].set_title('After Affine Registration', fontsize=14, fontweight='bold')
-            axes[1,0].axis('off')
+    reg["registered_nonrigid"] = cv2.remap(
+        reg["registered_affine"], map_x, map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    print("Non-rigid deformation complete.")
+    return reg
 
-        if nr_d is not None:
-            axes[1,1].imshow(blend(heg_d, nr_d), cmap='gray')
-            axes[1,1].set_title('After Non-Rigid (TPS) Deformation',
-                                fontsize=14, fontweight='bold')
-            axes[1,1].axis('off')
 
-        plt.tight_layout()
-        out = getattr(self, '_out_dir', Path('.'))
-        plt.savefig(str(out / 'registration_results.png'), dpi=150, bbox_inches='tight')
-        print("Saved 'registration_results.png'")
-        plt.close()
+def transform_maldi_to_he_coordinates(reg, maldi_coords):
+    if reg["refined_affine"] is None or reg["rbf_x"] is None:
+        raise RuntimeError("Complete registration pipeline first.")
+    maldi_coords = np.atleast_2d(maldi_coords).copy()
+    maldi_coords[:, 0] = np.clip(maldi_coords[:, 0], 0, reg["maldi_shape"][1]-1)
+    maldi_coords[:, 1] = np.clip(maldi_coords[:, 1], 0, reg["maldi_shape"][0]-1)
+    hom = np.column_stack([maldi_coords, np.ones(len(maldi_coords))])
+    affine_coords = (reg["refined_affine"] @ hom.T).T[:, :2]
+    dx = reg["rbf_x"](affine_coords)
+    dy = reg["rbf_y"](affine_coords)
+    return affine_coords + np.column_stack([dx, dy])
 
-    def save_registered_image(self, output_path='registered_maldi.tif'):
-        if self.registered_nonrigid is not None:
-            cv2.imwrite(output_path, (self.registered_nonrigid*255).astype(np.uint8))
-            print(f"Saved registered image -> '{output_path}'")
 
-    def visualize_coordinate_mapping(self):
-        print("\nGenerating coordinate mapping visualisation...")
-        tissue_coords = (np.asarray([c[:2] for c in self.maldi_df['coordinates']]) - 1)
-        he_grid = self.transform_maldi_to_he_coordinates(tissue_coords)
-        he_grid_x, he_grid_y = he_grid[:,0], he_grid[:,1]
+def transform_he_to_maldi_coordinates(reg, he_coords,
+                                      max_iterations=50, tolerance=0.5):
+    if reg["refined_affine"] is None or reg["rbf_x"] is None:
+        raise RuntimeError("Complete registration pipeline first.")
+    he_coords = np.atleast_2d(he_coords)
+    maldi_coords = np.zeros_like(he_coords)
+    affine_inv = np.linalg.inv(reg["refined_affine"])
+    for i, target in enumerate(he_coords):
+        guess = (affine_inv @ np.append(target, 1))[:2]
+        for _ in range(max_iterations):
+            predicted = transform_maldi_to_he_coordinates(reg, guess.reshape(1, -1))[0]
+            err = np.linalg.norm(predicted - target)
+            if err < tolerance:
+                break
+            guess -= 0.5 * (predicted - target)
+        maldi_coords[i] = guess
+    return maldi_coords
 
-        maldi_hom   = np.column_stack([self.maldi_grid, np.ones(len(self.maldi_grid))])
-        affine_only = (self.refined_affine @ maldi_hom.T).T[:, :2]
-        displacement     = he_grid - affine_only
-        displacement_mag = np.linalg.norm(displacement, axis=1)
-        max_displacement = displacement_mag.max()
 
-        subsample_indices = np.random.choice(len(he_grid_x),
-                                              size=len(he_grid_x)//2, replace=False)
-        fig = make_subplots(rows=1, cols=2,
-            subplot_titles=('MALDI Grid in H&E Space',
-                            f'Non-Rigid Displacement (max {max_displacement:.1f} px)'),
-            horizontal_spacing=0.1)
+def create_coordinate_mapping_grid(reg, grid_spacing=1, tissue_only=True,
+                                   intensity_threshold=0.1):
+    print(f"Creating coordinate mapping (spacing={grid_spacing})...")
+    if tissue_only:
+        tissue_coords = (np.asarray([c[:2] for c in reg["maldi_df"]["coordinates"]])
+                         - 1)
+        maldi_grid = (tissue_coords if grid_spacing == 1
+                      else tissue_coords[::grid_spacing])
+    else:
+        y = np.arange(0, reg["maldi_shape"][0], grid_spacing)
+        x = np.arange(0, reg["maldi_shape"][1], grid_spacing)
+        xv, yv = np.meshgrid(x, y)
+        maldi_grid = np.column_stack([xv.ravel(), yv.ravel()])
+    print(f"  Transforming {len(maldi_grid):,} coordinates...")
+    he_grid = transform_maldi_to_he_coordinates(reg, maldi_grid)
+    reg["maldi_grid"] = maldi_grid
+    df = pd.DataFrame({'maldi_x': maldi_grid[:, 0], 'maldi_y': maldi_grid[:, 1],
+                       'he_x':    he_grid[:, 0],    'he_y':    he_grid[:, 1]})
+    print(f"  Generated {len(df):,} coordinate mappings")
+    return df
 
-        fig.add_trace(go.Image(z=self.he_image), row=1, col=1)
-        fig.add_trace(go.Scatter(x=he_grid_x[subsample_indices],
-            y=he_grid_y[subsample_indices], mode='markers',
-            marker=dict(color='blue', size=3, opacity=0.1),
-            name='MALDI points'), row=1, col=1)
-        fig.add_trace(go.Scatter(x=self.he_landmarks[:,0], y=self.he_landmarks[:,1],
-            mode='markers', marker=dict(color='green', size=8,
-            line=dict(color='white', width=2)), name='H&E landmarks'), row=1, col=1)
 
-        fig.add_trace(go.Image(z=self.he_image), row=1, col=2)
-        mask = displacement_mag > 1.0
-        if np.any(mask):
-            n_vec = min(500, mask.sum())
-            sel   = np.random.choice(np.where(mask)[0], n_vec, replace=False)
-            vm    = np.zeros(len(mask), dtype=bool); vm[sel] = True
-            norm_d = ((displacement_mag[vm] - displacement_mag[vm].min()) /
-                      (displacement_mag[vm].max() - displacement_mag[vm].min() + 1e-10))
-            cmap   = cm.get_cmap('Spectral')
-            colors = [f'rgb({int(r*255)},{int(g*255)},{int(b*255)})'
-                      for r,g,b,_ in cmap(norm_d)]
-            for idx, i in enumerate(np.where(vm)[0]):
-                fig.add_trace(go.Scatter(
-                    x=[affine_only[i,0], he_grid[i,0]],
-                    y=[affine_only[i,1], he_grid[i,1]],
-                    mode='lines', line=dict(color=colors[idx], width=2),
-                    showlegend=False), row=1, col=2)
-            fig.add_trace(go.Scatter(x=he_grid[vm,0], y=he_grid[vm,1],
-                mode='markers',
-                marker=dict(color=displacement_mag[vm], colorscale='Spectral',
-                    size=6, symbol='arrow',
-                    colorbar=dict(title='Displacement (px)', x=1.15),
-                    showscale=True), name='Displacement'), row=1, col=2)
+def save_coordinate_mapping(reg, output_path='coordinate_mapping.csv',
+                            grid_spacing=1, tissue_only=True,
+                            intensity_threshold=0.1):
+    df = create_coordinate_mapping_grid(reg, grid_spacing, tissue_only,
+                                        intensity_threshold)
+    df.to_csv(output_path, index=False)
+    print(f"Saved coordinate mapping -> '{output_path}' ({len(df):,} rows)")
+    return df
 
-        fig.update_layout(height=700, width=1600,
-                          title_text='Coordinate Mapping Visualisation',
-                          showlegend=True, hovermode='closest')
-        out = getattr(self, '_out_dir', Path('.'))
-        fig.write_html(str(out / 'coordinate_mapping_accuracy.html'))
-        print("Saved 'coordinate_mapping_accuracy.html'")
+
+def visualize_results(reg, max_display_px=2048):
+    """Four-panel figure, downsampled to avoid matplotlib crash."""
+    print("\nGenerating registration visualisation...")
+    max_he = max(reg["he_shape"])
+    scale = min(1.0, max_display_px / max_he)
+    dh = int(reg["he_shape"][0] * scale)
+    dw = int(reg["he_shape"][1] * scale)
+    print(f"  Display: {reg['he_shape'][1]}x{reg['he_shape'][0]} -> {dw}x{dh} "
+          f"(scale={scale:.3f})")
+
+    he_d = cv2.resize(reg["he_image"], (dw, dh), interpolation=cv2.INTER_AREA)
+    heg_d = cv2.resize(reg["he_gray"], (dw, dh), interpolation=cv2.INTER_AREA)
+    maldi_d = cv2.resize(reg["maldi_gray"], (dw, dh), interpolation=cv2.INTER_AREA)
+    aff_d = (cv2.resize(reg["registered_affine"], (dw, dh), interpolation=cv2.INTER_AREA)
+             if reg["registered_affine"] is not None else None)
+    nr_d = (cv2.resize(reg["registered_nonrigid"], (dw, dh), interpolation=cv2.INTER_AREA)
+            if reg["registered_nonrigid"] is not None else None)
+
+    he_lm_d = reg["he_landmarks"] * scale
+
+    def blend(a, b, alpha=0.5):
+        a = (a-a.min())/(a.max()-a.min()+1e-8)
+        b = (b-b.min())/(b.max()-b.min()+1e-8)
+        return alpha*a + (1-alpha)*b
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 16))
+
+    axes[0, 0].imshow(blend(heg_d, maldi_d), cmap='gray')
+    axes[0, 0].set_title('Original (No Registration)', fontsize=14, fontweight='bold')
+    axes[0, 0].axis('off')
+
+    axes[0, 1].imshow(he_d)
+    if reg["refined_affine"] is not None:
+        mt = (cv2.transform(reg["maldi_landmarks"].reshape(-1, 1, 2),
+                            reg["refined_affine"][:2, :]).reshape(-1, 2) * scale)
+        for i in range(len(he_lm_d)):
+            axes[0, 1].plot([he_lm_d[i, 0], mt[i, 0]],
+                            [he_lm_d[i, 1], mt[i, 1]], 'y-', lw=2, alpha=0.6)
+            axes[0, 1].plot(*he_lm_d[i], 'ro', markersize=10,
+                            markeredgecolor='white', markeredgewidth=2)
+            axes[0, 1].plot(*mt[i], 'bo', markersize=10,
+                            markeredgecolor='white', markeredgewidth=2)
+            axes[0, 1].text(he_lm_d[i, 0]+6, he_lm_d[i, 1]-6,
+                            str(i+1), color='yellow', fontsize=9, fontweight='bold')
+    axes[0, 1].set_title('Landmark Correspondence', fontsize=14, fontweight='bold')
+    axes[0, 1].axis('off')
+
+    if aff_d is not None:
+        axes[1, 0].imshow(blend(heg_d, aff_d), cmap='gray')
+        axes[1, 0].set_title('After Affine Registration', fontsize=14, fontweight='bold')
+        axes[1, 0].axis('off')
+
+    if nr_d is not None:
+        axes[1, 1].imshow(blend(heg_d, nr_d), cmap='gray')
+        axes[1, 1].set_title('After Non-Rigid (TPS) Deformation',
+                             fontsize=14, fontweight='bold')
+        axes[1, 1].axis('off')
+
+    plt.tight_layout()
+    out = reg.get("out_dir", Path("."))
+    plt.savefig(str(out / 'registration_results.png'), dpi=150, bbox_inches='tight')
+    print("Saved 'registration_results.png'")
+    plt.close()
+
+
+def save_registered_image(reg, output_path='registered_maldi.tif'):
+    if reg["registered_nonrigid"] is not None:
+        cv2.imwrite(output_path, (reg["registered_nonrigid"]*255).astype(np.uint8))
+        print(f"Saved registered image -> '{output_path}'")
+
+
+def visualize_coordinate_mapping(reg):
+    print("\nGenerating coordinate mapping visualisation...")
+    tissue_coords = (np.asarray([c[:2] for c in reg["maldi_df"]["coordinates"]]) - 1)
+    he_grid = transform_maldi_to_he_coordinates(reg, tissue_coords)
+    he_grid_x, he_grid_y = he_grid[:, 0], he_grid[:, 1]
+
+    maldi_hom = np.column_stack([reg["maldi_grid"], np.ones(len(reg["maldi_grid"]))])
+    affine_only = (reg["refined_affine"] @ maldi_hom.T).T[:, :2]
+    displacement = he_grid - affine_only
+    displacement_mag = np.linalg.norm(displacement, axis=1)
+    max_displacement = displacement_mag.max()
+
+    subsample_indices = np.random.choice(len(he_grid_x),
+                                         size=len(he_grid_x)//2, replace=False)
+    fig = make_subplots(rows=1, cols=2,
+        subplot_titles=('MALDI Grid in H&E Space',
+                        f'Non-Rigid Displacement (max {max_displacement:.1f} px)'),
+        horizontal_spacing=0.1)
+
+    fig.add_trace(go.Image(z=reg["he_image"]), row=1, col=1)
+    fig.add_trace(go.Scatter(x=he_grid_x[subsample_indices],
+        y=he_grid_y[subsample_indices], mode='markers',
+        marker=dict(color='blue', size=3, opacity=0.1),
+        name='MALDI points'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=reg["he_landmarks"][:, 0], y=reg["he_landmarks"][:, 1],
+        mode='markers', marker=dict(color='green', size=8,
+        line=dict(color='white', width=2)), name='H&E landmarks'), row=1, col=1)
+
+    fig.add_trace(go.Image(z=reg["he_image"]), row=1, col=2)
+    mask = displacement_mag > 1.0
+    if np.any(mask):
+        n_vec = min(500, mask.sum())
+        sel = np.random.choice(np.where(mask)[0], n_vec, replace=False)
+        vm = np.zeros(len(mask), dtype=bool)
+        vm[sel] = True
+        norm_d = ((displacement_mag[vm] - displacement_mag[vm].min()) /
+                  (displacement_mag[vm].max() - displacement_mag[vm].min() + 1e-10))
+        cmap = cm.get_cmap('Spectral')
+        colors = [f'rgb({int(r*255)},{int(g*255)},{int(b*255)})'
+                  for r, g, b, _ in cmap(norm_d)]
+        for idx, i in enumerate(np.where(vm)[0]):
+            fig.add_trace(go.Scatter(
+                x=[affine_only[i, 0], he_grid[i, 0]],
+                y=[affine_only[i, 1], he_grid[i, 1]],
+                mode='lines', line=dict(color=colors[idx], width=2),
+                showlegend=False), row=1, col=2)
+        fig.add_trace(go.Scatter(x=he_grid[vm, 0], y=he_grid[vm, 1],
+            mode='markers',
+            marker=dict(color=displacement_mag[vm], colorscale='Spectral',
+                size=6, symbol='arrow',
+                colorbar=dict(title='Displacement (px)', x=1.15),
+                showscale=True), name='Displacement'), row=1, col=2)
+
+    fig.update_layout(height=700, width=1600,
+                      title_text='Coordinate Mapping Visualisation',
+                      showlegend=True, hovermode='closest')
+    out = reg.get("out_dir", Path("."))
+    fig.write_html(str(out / 'coordinate_mapping_accuracy.html'))
+    print("Saved 'coordinate_mapping_accuracy.html'")
 
 
 # ===========================================================================
@@ -761,36 +785,36 @@ def run_registration_pipeline(he_path, maldi_path, n_landmarks=8,
     print(f"Output directory: {out.resolve()}")
 
     print(f"\nStep 1/5: Loading images...")
-    reg = MALDIRegistration(he_path, maldi_path)
-    reg._out_dir = out
+    reg = initialize_registration(he_path, maldi_path, output_dir=out)
 
     if auto_boundary_align:
         print(f"\nStep 2a/5: Auto tissue boundary alignment...")
-        reg.align_tissue_boundaries()
+        align_tissue_boundaries(reg)
 
     print(f"\nStep 2b/5: Landmark selection...")
     if use_saved_landmarks and landmarks:
-        reg.load_landmarks_from_dict(landmarks)
+        load_landmarks_from_dict(reg, landmarks)
     else:
-        reg.select_landmarks(n_points=n_landmarks, use_napari=use_napari)
+        select_landmarks(reg, n_points=n_landmarks, use_napari=use_napari)
 
     print(f"\nStep 3/5: Landmark transform + residual check...")
-    residuals = reg.compute_affine_transform(use_full_affine=use_full_affine,
-                                              max_residual_px=max_residual_px)
+    residuals = compute_affine_transform(reg, use_full_affine=use_full_affine,
+                                         max_residual_px=max_residual_px)
     # refined_affine is now set directly from landmarks inside compute_affine_transform
 
     print(f"\nStep 4/5: Non-rigid TPS deformation...")
-    reg.apply_nonrigid_deformation()
+    apply_nonrigid_deformation(reg)
 
     print(f"\nStep 5/5: Saving results...")
-    #reg.visualize_results()
-    reg.save_registered_image(output_path=str(out / 'registered_maldi.tif'))
+    visualize_results(reg)
+    save_registered_image(reg, output_path=str(out / 'registered_maldi.tif'))
 
     if save_coords:
-        reg.save_coordinate_mapping(
+        save_coordinate_mapping(
+            reg,
             output_path=str(out / 'coordinate_mapping.csv'),
             grid_spacing=grid_spacing, tissue_only=tissue_only)
-        #reg.visualize_coordinate_mapping()
+        # visualize_coordinate_mapping(reg)
 
     print(f"\n{SEP}\nREGISTRATION COMPLETE\n{SEP}")
     print(f"  Outputs: {out.resolve()}\n{SEP}\n")
@@ -813,8 +837,8 @@ if __name__ == "__main__":
     MALDI_IMG_PATH = "/home/kia/MALDI_Metabolomics/img_folder/Taurine_img_withoutborders.tif"
     GLOBALREG_OUTPUT_DIR = "/home/kia/MALDI_Metabolomics/kidney_test"
     """
-    FULL_HE_PATH    = "/home/kia/MALDI_Metabolomics/kidney_test/HE_fake_img.png"
-    MALDI_IMG_PATH = "/home/kia/MALDI_Metabolomics/kidney_test/maldi_test_img.png"
+    FULL_HE_PATH    = "/home/kia/MALDI_Metabolomics/high_res_MSI/D2_10x_originalExport.tif"
+    MALDI_IMG_PATH = "/home/kia/MALDI_Metabolomics/img_folder/Taurine_img_withoutborders.tif"
     GLOBALREG_OUTPUT_DIR = "/home/kia/MALDI_Metabolomics/kidney_test"
 
     USE_SAVED_LANDMARKS = False
