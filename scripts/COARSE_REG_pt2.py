@@ -837,8 +837,8 @@ if __name__ == "__main__":
     MALDI_IMG_PATH = "/home/kia/MALDI_Metabolomics/img_folder/Taurine_img_withoutborders.tif"
     GLOBALREG_OUTPUT_DIR = "/home/kia/MALDI_Metabolomics/kidney_test"
     """
-    FULL_HE_PATH    = "/home/kia/MALDI_Metabolomics/high_res_MSI/D2_10x_originalExport.tif"
-    MALDI_IMG_PATH = "/home/kia/MALDI_Metabolomics/img_folder/Taurine_img_withoutborders.tif"
+    FULL_HE_PATH    = "/home/kia/MALDI_Metabolomics/kidney_test/HE_fake_img.png"
+    MALDI_IMG_PATH = "/home/kia/MALDI_Metabolomics/kidney_test/maldi_test_img.png"
     GLOBALREG_OUTPUT_DIR = "/home/kia/MALDI_Metabolomics/kidney_test"
 
     USE_SAVED_LANDMARKS = False

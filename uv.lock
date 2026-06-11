@@ -1070,6 +1070,24 @@ wheels = [
 ]
 
 [[package]]
+name = "ipympl"
+version = "0.10.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "ipython", version = "9.10.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "ipython", version = "9.12.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "ipywidgets" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "traitlets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/16/9c/f79e29f6262e821a15757662aa11cbb1db0a51ef836a32a46ddcb25e6832/ipympl-0.10.0.tar.gz", hash = "sha256:eda69602a010af2a42e8ebd069b0ee0dbe8df7fc69d7c1e8b99fece0a2fe613f", size = 3595672, upload-time = "2026-01-21T20:19:47.971Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/12/b3/88c0ef22878c86035f058df0ac6c171319ffd0aa52a406455ed3a3847566/ipympl-0.10.0-py3-none-any.whl", hash = "sha256:a09c4f0ff86490cc62aed45e53b912fb706e3ec3506c4a51ce4a670d6667f5ce", size = 519020, upload-time = "2026-01-21T20:19:46.325Z" },
+]
+
+[[package]]
 name = "ipython"
 version = "9.10.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1459,6 +1477,7 @@ dependencies = [
     { name = "igraph" },
     { name = "imageio" },
     { name = "ipycanvas" },
+    { name = "ipympl" },
     { name = "ipywidgets" },
     { name = "jinja2" },
     { name = "joblib" },
@@ -1585,6 +1604,7 @@ requires-dist = [
     { name = "igraph", specifier = "==1.0.0" },
     { name = "imageio", specifier = "==2.37.2" },
     { name = "ipycanvas", specifier = ">=0.14.3" },
+    { name = "ipympl", specifier = ">=0.10.0" },
     { name = "ipywidgets", specifier = ">=8.1.8" },
     { name = "jinja2", specifier = "==3.1.6" },
     { name = "joblib", specifier = "==1.5.3" },
