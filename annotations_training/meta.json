@@ -1,0 +1,7 @@
+{
+  "image": "/home/kia/MALDI_Metabolomics/metabol_data/high_res_MSI/D2_10x_originalExport.tif",
+  "patch_size": 1024,
+  "overlap": 64,
+  "image_h": 12468,
+  "image_w": 15297
+}

@@ -1,0 +1,16 @@
+selected_candidate: direct_biological_objective
+reason: optimized vessel Chamfer + structural difference + tissue overlap directly
+score: 4.447208513559886
+angle_deg: 0.11687683414769759
+tx: 0.11432364021205366
+ty: 0.037059763549347036
+vessel_chamfer: 31.389132878204556
+maldi_to_he_mean: 11.833569020311147
+he_to_maldi_mean: 50.94469673609797
+structural_diff: 0.38861897587776184
+tissue_overlap: 0.38976537169546244
+lost_overlap: 0.6102346283045376
+transform_size: 0.01235516401389243
+vessel_n_maldi: 1094
+vessel_n_he: 881
+selected_stage: local

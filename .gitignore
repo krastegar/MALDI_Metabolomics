@@ -232,5 +232,6 @@ img_folder/
 # data folder: 
 space_ranger*/
 square_002um/
-data/
+*data*/
+Nuclei_Visualization/
 

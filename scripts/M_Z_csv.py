@@ -5,10 +5,10 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from scipy import sparse as sp
 from pyimzml.ImzMLParser import ImzMLParser, getionimage
-from scripts.SpaCoObject import SPACO
+#from scripts.SpaCoObject import SPACO
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler, normalize
-import plotly.express as px
+#import plotly.express as px
 from sklearn.cluster import KMeans
 import umap
 import igraph as ig
@@ -475,7 +475,7 @@ def compute_sparsity(data, by='mzs', intensity_thresh=None, plot=True, save_path
 
 if __name__ == "__main__":
     # file path to the imzml file
-    imzml_path = Path("/home/kia/MALDI_Metabolomics/MSI_data_grant/Mass_Spec_data/20251012_old_liver.imzML")
+    imzml_path = Path("/home/kia/MALDI_Metabolomics/metabol_data/20251012_old_liver.imzML")
 
     # initialize the SpectrumData class
     spectrum_data = SpectrumData(imzml_path, mz_tol=0.0042, min_count=2, min_intensity=1)
